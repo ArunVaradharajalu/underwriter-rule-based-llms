@@ -297,15 +297,33 @@ class S3Service:
             filename = f"{bank_id}_{policy_type}_rules_{timestamp}.xlsx"
             s3_key = f"generated-rules/{container_id}/{version}/{filename}"
 
-            self.s3_client.upload_file(
-                local_excel_path,
-                self.bucket_name,
-                s3_key,
-                ExtraArgs={
-                    'ContentType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    'ACL': 'public-read'  # Make Excel file publicly accessible
-                }
-            )
+            # Upload file - try with public-read first, fall back to standard upload
+            try:
+                self.s3_client.upload_file(
+                    local_excel_path,
+                    self.bucket_name,
+                    s3_key,
+                    ExtraArgs={
+                        'ContentType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        'ACL': 'public-read'  # Make Excel file publicly accessible
+                    }
+                )
+                print(f"✓ Excel file uploaded with public-read ACL")
+            except Exception as acl_error:
+                if 'AccessControlListNotSupported' in str(acl_error):
+                    # Bucket doesn't support ACLs, upload without ACL
+                    print(f"⚠ Bucket doesn't support ACLs, uploading without ACL...")
+                    self.s3_client.upload_file(
+                        local_excel_path,
+                        self.bucket_name,
+                        s3_key,
+                        ExtraArgs={
+                            'ContentType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                        }
+                    )
+                    print(f"ℹ Excel file uploaded (bucket-level permissions apply)")
+                else:
+                    raise acl_error
 
             s3_url = f"https://{self.bucket_name}.s3.{self.region}.amazonaws.com/{s3_key}"
 
