@@ -37,6 +37,7 @@ services:
       - ./uploads:/uploads
       - ./generated_rules:/generated_rules
       - maven-repository:/opt/jboss/.m2/repository
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker-in-Docker for container orchestration
     build: rule-agent
     depends_on:
       drools:
@@ -49,6 +50,11 @@ services:
       - DATADIR=/data
       - UPLOAD_DIR=/uploads
       - DROOLS_RULES_DIR=/generated_rules
+
+      # Container orchestration (separate containers per rule set)
+      - USE_CONTAINER_ORCHESTRATOR=true  # Enabled for development and production
+      - ORCHESTRATION_PLATFORM=docker
+      - DOCKER_NETWORK=underwriting-net
     env_file:
       - "llm.env"  # All Drools, AWS, and LLM config loaded from here
     ports:

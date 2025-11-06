@@ -22,6 +22,7 @@ Key architectural patterns:
 - Policy documents in `data/<use-case>/catalog/` are ingested into a vector store for RAG
 - The LLM agent (`RuleAIAgent`) decides whether to invoke decision services or use RAG based on the user's query
 - Both ODM and ADS services implement the `RuleService` interface for uniform invocation
+- **Container-per-ruleset**: Each deployed rule set gets its own dedicated Drools container for complete isolation (see [CONTAINER_PER_RULESET.md](CONTAINER_PER_RULESET.md))
 
 ## Development Commands
 
@@ -78,15 +79,22 @@ Build all services:
 docker-compose build
 ```
 
-Run the complete stack (ODM + backend + frontend):
+Run the complete stack:
 ```bash
 docker-compose up
 ```
 
 This starts:
-- ODM Decision Server on port 9060
+- Drools KIE Server on port 8080 (default container)
 - Backend API on port 9000
-- Frontend web app on port 8080
+- Container orchestrator enabled (creates separate Drools containers per rule set)
+
+**Important**: The system uses **container-per-ruleset architecture**. When you deploy rules, a new dedicated Drools container will be created automatically. See [CONTAINER_PER_RULESET.md](CONTAINER_PER_RULESET.md) for details.
+
+Example deployment workflow:
+1. Deploy rules → Creates `drools-chase-insurance-rules` container on port 8081
+2. Deploy more rules → Creates `drools-bofa-loan-rules` container on port 8082
+3. Each rule set runs in complete isolation with its own JVM
 
 ## LLM Configuration
 

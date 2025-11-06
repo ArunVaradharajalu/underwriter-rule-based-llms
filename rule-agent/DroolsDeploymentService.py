@@ -26,6 +26,7 @@ from datetime import datetime
 class DroolsDeploymentService:
     """
     Handles deployment of generated rules to Drools KIE Server
+    Supports container-per-ruleset architecture
     """
 
     def __init__(self):
@@ -38,7 +39,23 @@ class DroolsDeploymentService:
         # Use temp directory instead of persistent storage
         # Files will be auto-deleted when temp directory context exits
         self.use_temp_dir = True
-        print(f"Drools Deployment Service initialized - Using temporary directories (no persistent local storage)")
+
+        # Container orchestration mode
+        self.use_orchestrator = os.getenv("USE_CONTAINER_ORCHESTRATOR", "false").lower() == "true"
+
+        # Load orchestrator if enabled
+        self.orchestrator = None
+        if self.use_orchestrator:
+            try:
+                from ContainerOrchestrator import get_orchestrator
+                self.orchestrator = get_orchestrator()
+                print(f"Drools Deployment Service initialized with container orchestration enabled")
+            except Exception as e:
+                print(f"⚠ Failed to load orchestrator: {e}")
+                self.use_orchestrator = False
+                print(f"Drools Deployment Service initialized - Using temporary directories (no persistent local storage)")
+        else:
+            print(f"Drools Deployment Service initialized - Using temporary directories (no persistent local storage)")
 
     def deploy_rules(self, drl_content: str, container_id: str, group_id: str = "com.underwriting",
                      artifact_id: str = "underwriting-rules", version: str = None) -> Dict:
@@ -567,13 +584,31 @@ Manual Deployment Steps:
                 result["steps"]["save_drl"]["path"] = drl_temp.name
                 print(f"✓ DRL copied to temp location for S3 upload: {drl_temp.name}")
 
-            # Step 4: Deploy to KIE Server
+            # Step 4: Create dedicated Drools container (if orchestrator enabled)
+            if self.use_orchestrator and self.orchestrator:
+                print(f"Creating dedicated Drools container for {container_id}...")
+                jar_path = result["steps"]["build"].get("jar_path")
+                if jar_path:
+                    orchestration_result = self.orchestrator.create_drools_container(container_id, jar_path)
+                    result["steps"]["create_container"] = orchestration_result
+
+                    if orchestration_result["status"] == "success":
+                        print(f"✓ Dedicated container created: {orchestration_result.get('container_name')}")
+                    elif orchestration_result["status"] == "exists":
+                        print(f"ℹ Container already exists: {container_id}")
+                    else:
+                        print(f"⚠ Failed to create container: {orchestration_result.get('message')}")
+
+            # Step 5: Deploy to KIE Server
             deploy_result = self.deploy_container(container_id, group_id, artifact_id, version)
             result["steps"]["deploy"] = deploy_result
 
             if deploy_result["status"] == "success":
                 result["status"] = "success"
-                result["message"] = f"Rules automatically deployed to container {container_id}"
+                message = f"Rules automatically deployed to container {container_id}"
+                if self.use_orchestrator:
+                    message += " (dedicated Drools container)"
+                result["message"] = message
             else:
                 result["status"] = "partial"
                 result["message"] = "KJar built but deployment to KIE Server failed"

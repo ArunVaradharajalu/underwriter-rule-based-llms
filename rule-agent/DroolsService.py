@@ -24,6 +24,7 @@ class DroolsService(RuleService):
     """
     Drools KIE Server integration for rule execution
     Supports multiple invocation modes: KIE Server batch commands, DMN, and custom REST
+    Supports container-per-ruleset architecture with dynamic routing
     """
 
     def __init__(self):
@@ -39,8 +40,57 @@ class DroolsService(RuleService):
         # Invocation mode: 'kie-batch', 'dmn', 'rest'
         self.invocation_mode = os.getenv("DROOLS_INVOCATION_MODE", "kie-batch")
 
+        # Container orchestration mode
+        self.use_orchestrator = os.getenv("USE_CONTAINER_ORCHESTRATOR", "false").lower() == "true"
+
+        # Load orchestrator if enabled
+        self.orchestrator = None
+        if self.use_orchestrator:
+            try:
+                from ContainerOrchestrator import get_orchestrator
+                self.orchestrator = get_orchestrator()
+                print("✓ Container orchestrator enabled")
+            except Exception as e:
+                print(f"⚠ Failed to load orchestrator: {e}")
+                self.use_orchestrator = False
+
         # Check connection
         self.isConnected = self.checkDroolsServer()
+
+    def _resolve_container_endpoint(self, rulesetPath):
+        """
+        Resolve the correct Drools container endpoint for a request
+
+        Args:
+            rulesetPath: Path like /kie-server/services/rest/server/containers/chase-insurance-rules/...
+
+        Returns:
+            tuple: (base_url, remaining_path)
+        """
+        if not self.use_orchestrator or not self.orchestrator:
+            # Use default server URL
+            return self.server_url, rulesetPath
+
+        # Extract container ID from path
+        # Path format: /kie-server/services/rest/server/containers/{container_id}/...
+        parts = rulesetPath.split('/')
+        try:
+            containers_index = parts.index('containers')
+            if containers_index + 1 < len(parts):
+                container_id = parts[containers_index + 1]
+
+                # Look up container endpoint
+                endpoint = self.orchestrator.get_container_endpoint(container_id)
+                if endpoint:
+                    print(f"✓ Routing to container: {container_id} at {endpoint}")
+                    return endpoint, rulesetPath
+                else:
+                    print(f"⚠ Container {container_id} not found in registry, using default URL")
+        except (ValueError, IndexError):
+            print(f"⚠ Could not extract container ID from path: {rulesetPath}")
+
+        # Fall back to default
+        return self.server_url, rulesetPath
 
     def invokeDecisionService(self, rulesetPath, decisionInputs):
         """
@@ -90,7 +140,9 @@ class DroolsService(RuleService):
         }
 
         try:
-            url = self.server_url + rulesetPath
+            # Resolve correct container endpoint
+            base_url, path = self._resolve_container_endpoint(rulesetPath)
+            url = base_url + path
             print(f"Invoking Drools (KIE Batch) at: {url}")
 
             response = requests.post(
@@ -127,7 +179,9 @@ class DroolsService(RuleService):
         }
 
         try:
-            url = self.server_url + rulesetPath
+            # Resolve correct container endpoint
+            base_url, path = self._resolve_container_endpoint(rulesetPath)
+            url = base_url + path
             print(f"Invoking Drools (DMN) at: {url}")
 
             response = requests.post(
@@ -156,7 +210,9 @@ class DroolsService(RuleService):
         }
 
         try:
-            url = self.server_url + rulesetPath
+            # Resolve correct container endpoint
+            base_url, path = self._resolve_container_endpoint(rulesetPath)
+            url = base_url + path
             print(f"Invoking Drools (REST) at: {url}")
 
             response = requests.post(
