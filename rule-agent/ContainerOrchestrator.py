@@ -106,11 +106,19 @@ class ContainerOrchestrator:
             # Check if container already exists
             existing = self._check_existing_docker_container(client, container_name)
             if existing:
-                return {
-                    "status": "exists",
-                    "message": f"Container {container_name} already exists",
-                    "endpoint": self.registry[container_id]['endpoint']
-                }
+                # Check if already in registry
+                if container_id in self.registry:
+                    return {
+                        "status": "exists",
+                        "message": f"Container {container_name} already exists",
+                        "endpoint": self.registry[container_id]['endpoint']
+                    }
+                else:
+                    # Container exists but not in registry - return error to avoid conflicts
+                    return {
+                        "status": "error",
+                        "message": f"Container {container_name} already exists but not in registry. Please delete it first: docker rm -f {container_name}"
+                    }
 
             # Create volume for the ruleapp
             volume_name = f"drools-{container_id}-maven"
