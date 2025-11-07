@@ -38,6 +38,8 @@ servers:
 tags:
   - name: Underwriting Workflow
     description: Policy document processing and rule generation
+  - name: File Management
+    description: File upload and storage operations
   - name: Drools Management
     description: KIE Server container management
   - name: Rule Testing
@@ -114,6 +116,187 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /upload_file:
+    post:
+      tags:
+        - File Management
+      summary: Upload file to S3 bucket
+      description: |
+        Upload any file to AWS S3 bucket with organized folder structure.
+        
+        **Features:**
+        - Files are stored in organized folders: `{folder}/YYYY-MM-DD/filename_timestamp.ext`
+        - Automatic filename sanitization and timestamping to prevent overwrites
+        - Support for multiple file types (PDF, images, documents, etc.)
+        - File size validation (max 100 MB)
+        - Returns S3 URL for immediate access
+        
+        **Storage Structure:**
+        - Default folder: `uploads/`
+        - Date-based subfolders: `uploads/2025-11-07/`
+        - Timestamped filenames: `document_20251107_143022.pdf`
+        
+        **Security:**
+        - Filename sanitization prevents path traversal attacks
+        - Folder name validation
+        - Content type detection based on file extension
+      operationId: uploadFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: File to upload (any file type supported)
+                folder:
+                  type: string
+                  description: 'S3 folder name where file will be stored (default: "uploads")'
+                  example: uploads
+            encoding:
+              file:
+                contentType: application/octet-stream
+      responses:
+        '200':
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: File uploaded successfully to S3
+                  data:
+                    type: object
+                    properties:
+                      s3_url:
+                        type: string
+                        format: uri
+                        description: Full S3 URL to access the uploaded file
+                        example: https://uw-data-extraction.s3.us-east-1.amazonaws.com/uploads/2025-11-07/document_20251107_143022.pdf
+                      s3_key:
+                        type: string
+                        description: S3 key (path) of the uploaded file
+                        example: uploads/2025-11-07/document_20251107_143022.pdf
+                      bucket:
+                        type: string
+                        description: S3 bucket name
+                        example: uw-data-extraction
+                      filename:
+                        type: string
+                        description: Timestamped filename stored in S3
+                        example: document_20251107_143022.pdf
+                      original_filename:
+                        type: string
+                        description: Original filename provided by user
+                        example: document.pdf
+                      folder:
+                        type: string
+                        description: Folder where file is stored
+                        example: uploads
+                      file_size:
+                        type: integer
+                        description: File size in bytes
+                        example: 245760
+                      content_type:
+                        type: string
+                        description: MIME content type
+                        example: application/pdf
+              examples:
+                pdf-upload:
+                  summary: PDF file upload
+                  value:
+                    status: success
+                    message: File uploaded successfully to S3
+                    data:
+                      s3_url: https://uw-data-extraction.s3.us-east-1.amazonaws.com/uploads/2025-11-07/policy_20251107_143022.pdf
+                      s3_key: uploads/2025-11-07/policy_20251107_143022.pdf
+                      bucket: uw-data-extraction
+                      filename: policy_20251107_143022.pdf
+                      original_filename: policy.pdf
+                      folder: uploads
+                      file_size: 245760
+                      content_type: application/pdf
+                image-upload:
+                  summary: Image file upload
+                  value:
+                    status: success
+                    message: File uploaded successfully to S3
+                    data:
+                      s3_url: https://uw-data-extraction.s3.us-east-1.amazonaws.com/uploads/2025-11-07/image_20251107_143022.png
+                      s3_key: uploads/2025-11-07/image_20251107_143022.png
+                      bucket: uw-data-extraction
+                      filename: image_20251107_143022.png
+                      original_filename: screenshot.png
+                      folder: uploads
+                      file_size: 102400
+                      content_type: image/png
+        '400':
+          description: Bad request (missing file, invalid folder, file too large, etc.)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: No file provided. Please include a file in the "file" field.
+                  error_code:
+                    type: string
+                    enum:
+                      - MISSING_FILE
+                      - EMPTY_FILENAME
+                      - EMPTY_FILE
+                      - FILE_TOO_LARGE
+                      - INVALID_FOLDER
+                    example: MISSING_FILE
+              examples:
+                missing-file:
+                  summary: No file provided
+                  value:
+                    status: error
+                    message: 'No file provided. Please include a file in the "file" field.'
+                    error_code: MISSING_FILE
+                file-too-large:
+                  summary: File exceeds size limit
+                  value:
+                    status: error
+                    message: 'File size (104857600 bytes) exceeds maximum allowed size (104857600 bytes)'
+                    error_code: FILE_TOO_LARGE
+                    file_size: 104857600
+                    max_size: 104857600
+        '500':
+          description: Internal server error (S3 upload failed, network error, etc.)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  message:
+                    type: string
+                    example: 'S3 upload failed: AccessDenied'
+                  error:
+                    type: string
+                    example: 'Access Denied'
+                  error_code:
+                    type: string
+                    example: AccessDenied
 
   /drools_containers:
     get:

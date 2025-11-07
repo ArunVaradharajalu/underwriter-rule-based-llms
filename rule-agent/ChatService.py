@@ -24,8 +24,10 @@ from ADSService import ADSService
 from DroolsService import DroolsService
 from UnderwritingWorkflow import UnderwritingWorkflow
 from RuleCacheService import get_rule_cache
+from S3Service import S3Service
 import json,os
 from Utils import find_descriptors
+from werkzeug.utils import secure_filename
 
 ROUTE="/rule-agent"
 
@@ -70,6 +72,9 @@ aiAgent = AIAgent(llm)
 
 # create Underwriting Workflow
 underwritingWorkflow = UnderwritingWorkflow(llm)
+
+# create S3 Service for file uploads
+s3Service = S3Service()
 
 def ingestAllDocuments(directory_path):
     """Reads all PDF files in a directory and returns a list of document to load.
@@ -469,6 +474,115 @@ def get_cached_rules():
         return jsonify({
             "status": "error",
             "message": str(e)
+        }), 500
+
+# File upload endpoint
+@app.route(ROUTE + '/upload_file', methods=['POST'])
+def upload_file():
+    """
+    Upload a file to AWS S3 bucket
+    
+    Accepts multipart/form-data with a file field.
+    Files are stored in S3 with organized folder structure: uploads/YYYY-MM-DD/filename_timestamp.ext
+    
+    Returns:
+        - 200: File uploaded successfully with S3 URL
+        - 400: Missing file or invalid request
+        - 500: Upload failed (S3 error, network error, etc.)
+    """
+    try:
+        # Check if file is present in request
+        if 'file' not in request.files:
+            return jsonify({
+                'status': 'error',
+                'message': 'No file provided. Please include a file in the "file" field.',
+                'error_code': 'MISSING_FILE'
+            }), 400
+        
+        file = request.files['file']
+        
+        # Check if file is actually selected
+        if file.filename == '':
+            return jsonify({
+                'status': 'error',
+                'message': 'No file selected. Please select a file to upload.',
+                'error_code': 'EMPTY_FILENAME'
+            }), 400
+        
+        # Get optional parameters
+        folder = request.form.get('folder', 'uploads')  # Default folder: 'uploads'
+        max_file_size = 100 * 1024 * 1024  # 100 MB limit
+        
+        # Validate folder name (prevent path traversal)
+        if '..' in folder or '/' in folder or '\\' in folder:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid folder name. Folder cannot contain path separators or ".."',
+                'error_code': 'INVALID_FOLDER'
+            }), 400
+        
+        # Read file content
+        file_content = file.read()
+        file_size = len(file_content)
+        
+        # Validate file size
+        if file_size == 0:
+            return jsonify({
+                'status': 'error',
+                'message': 'File is empty. Please upload a non-empty file.',
+                'error_code': 'EMPTY_FILE'
+            }), 400
+        
+        if file_size > max_file_size:
+            return jsonify({
+                'status': 'error',
+                'message': f'File size ({file_size} bytes) exceeds maximum allowed size ({max_file_size} bytes)',
+                'error_code': 'FILE_TOO_LARGE',
+                'file_size': file_size,
+                'max_size': max_file_size
+            }), 400
+        
+        # Get original filename
+        original_filename = secure_filename(file.filename)
+        
+        # Upload to S3
+        upload_result = s3Service.upload_file_to_s3(
+            file_content=file_content,
+            filename=original_filename,
+            folder=folder
+        )
+        
+        # Check upload result
+        if upload_result.get('status') == 'error':
+            return jsonify({
+                'status': 'error',
+                'message': upload_result.get('message', 'Upload failed'),
+                'error': upload_result.get('error', 'Unknown error'),
+                'error_code': upload_result.get('error_code', 'UPLOAD_FAILED')
+            }), 500
+        
+        # Return success response
+        return jsonify({
+            'status': 'success',
+            'message': 'File uploaded successfully to S3',
+            'data': {
+                's3_url': upload_result.get('s3_url'),
+                's3_key': upload_result.get('s3_key'),
+                'bucket': upload_result.get('bucket'),
+                'filename': upload_result.get('filename'),
+                'original_filename': upload_result.get('original_filename'),
+                'folder': upload_result.get('folder'),
+                'file_size': upload_result.get('file_size'),
+                'content_type': upload_result.get('content_type')
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in upload_file endpoint: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}',
+            'error_code': 'INTERNAL_ERROR'
         }), 500
 
 # Swagger documentation endpoints
