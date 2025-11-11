@@ -132,7 +132,7 @@ def chat_without_tools():
 
 # New endpoints for underwriting workflow
 
-@app.route(ROUTE + '/upload_policy', methods=['POST'])
+@app.route(ROUTE + '/upload_policy', methods=['POST', 'OPTIONS'])
 def upload_policy():
     """DEPRECATED: Local file upload is no longer supported. Use /process_policy_from_s3 instead."""
     return jsonify({
@@ -140,7 +140,7 @@ def upload_policy():
         'status': 'deprecated'
     }), 400
 
-@app.route(ROUTE + '/process_policy_from_s3', methods=['POST'])
+@app.route(ROUTE + '/process_policy_from_s3', methods=['POST', 'OPTIONS'])
 def process_policy_from_s3():
     """Process a policy PDF from S3 URL through the underwriting workflow"""
     data = request.get_json()
@@ -233,7 +233,7 @@ def drools_container_status():
     result = deployment.get_container_status(container_id)
     return jsonify(result)
 
-@app.route(ROUTE + '/test_rules', methods=['POST'])
+@app.route(ROUTE + '/test_rules', methods=['POST', 'OPTIONS'])
 def test_rules():
     """
     Test deployed Drools rules with sample data
@@ -432,7 +432,7 @@ def get_cache_status():
             "message": str(e)
         }), 500
 
-@app.route(ROUTE + '/cache/clear', methods=['POST'])
+@app.route(ROUTE + '/cache/clear', methods=['POST', 'OPTIONS'])
 def clear_cache():
     """
     Clear rule cache (specific document or all)
@@ -599,7 +599,7 @@ def query_policies():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route(ROUTE + '/api/v1/evaluate-policy', methods=['POST'])
+@app.route(ROUTE + '/api/v1/evaluate-policy', methods=['POST', 'OPTIONS'])
 def evaluate_policy():
     """
     Evaluate a policy application using deployed rule engine
@@ -865,7 +865,7 @@ def health_check():
         }), 503
 
 # File upload endpoint
-@app.route(ROUTE + '/upload_file', methods=['POST'])
+@app.route(ROUTE + '/upload_file', methods=['POST', 'OPTIONS'])
 def upload_file():
     """
     Upload a file to AWS S3 bucket
