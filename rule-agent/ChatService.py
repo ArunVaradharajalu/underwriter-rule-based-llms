@@ -154,6 +154,10 @@ def chat_without_tools():
 @app.route(ROUTE + '/upload_policy', methods=['POST', 'OPTIONS'])
 def upload_policy():
     """DEPRECATED: Local file upload is no longer supported. Use /process_policy_from_s3 instead."""
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+
     return jsonify({
         'error': 'Local file upload is deprecated. Please upload your PDF to S3 and use /process_policy_from_s3 endpoint instead.',
         'status': 'deprecated'
@@ -162,6 +166,10 @@ def upload_policy():
 @app.route(ROUTE + '/process_policy_from_s3', methods=['POST', 'OPTIONS'])
 def process_policy_from_s3():
     """Process a policy PDF from S3 URL through the underwriting workflow"""
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+
     data = request.get_json()
 
     if not data:
@@ -275,6 +283,10 @@ def test_rules():
 
     Returns the Decision object with approval status, reason, and premium multiplier
     """
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+
     data = request.get_json()
 
     if not data:
@@ -464,6 +476,10 @@ def clear_cache():
     Returns:
         JSON with status and message
     """
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+
     try:
         data = request.get_json() or {}
         document_hash = data.get('document_hash')
@@ -627,11 +643,7 @@ def evaluate_policy():
     """
     # Handle OPTIONS preflight request
     if request.method == 'OPTIONS':
-        response = jsonify({'status': 'ok'})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
-        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
-        return response, 200
+        return '', 200
 
     try:
         data = request.get_json()
@@ -896,15 +908,19 @@ def health_check():
 def upload_file():
     """
     Upload a file to AWS S3 bucket
-    
+
     Accepts multipart/form-data with a file field.
     Files are stored in S3 with organized folder structure: uploads/YYYY-MM-DD/filename_timestamp.ext
-    
+
     Returns:
         - 200: File uploaded successfully with S3 URL
         - 400: Missing file or invalid request
         - 500: Upload failed (S3 error, network error, etc.)
     """
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+
     try:
         # Check if file is present in request
         if 'file' not in request.files:
