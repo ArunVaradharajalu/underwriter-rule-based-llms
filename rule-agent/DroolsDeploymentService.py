@@ -696,3 +696,193 @@ Manual Deployment Steps:
 
         # Temp directory and all contents are now deleted
         return result
+
+    def deploy_hierarchical_rules_automatically(self, level1_drl: str, level2_drl: str, level3_drl: str,
+                                                 container_id: str,
+                                                 group_id: str = "com.underwriting",
+                                                 artifact_id: str = "underwriting-rules",
+                                                 version: str = None) -> Dict:
+        """
+        Deploy hierarchical rules (3 levels) to a SINGLE Docker container with 3 separate KIE containers inside
+
+        This creates:
+        - One Docker container: {container_id}
+        - Three KIE containers inside:
+            1. {container_id}-level1
+            2. {container_id}-level2
+            3. {container_id}-level3
+
+        :param level1_drl: Level 1 (Critical) DRL content
+        :param level2_drl: Level 2 (Standard) DRL content
+        :param level3_drl: Level 3 (Preferred) DRL content
+        :param container_id: Base container ID (e.g., 'chase-life-insurance-rules')
+        :param group_id: Maven group ID
+        :param artifact_id: Base artifact ID
+        :param version: Version (auto-generated if not provided)
+        :return: Complete deployment result
+        """
+        # Auto-generate version if not provided
+        if not version:
+            version = datetime.now().strftime("%Y%m%d.%H%M%S")
+
+        result = {
+            "container_id": container_id,
+            "hierarchical": True,
+            "levels": {},
+            "status": "in_progress"
+        }
+
+        # Use temporary directory for all build artifacts
+        with tempfile.TemporaryDirectory() as temp_dir:
+            print(f"\n{'='*60}")
+            print(f"HIERARCHICAL DEPLOYMENT: {container_id}")
+            print(f"{'='*60}")
+            print(f"Using temporary directory: {temp_dir}\n")
+
+            # Step 1: Create dedicated Drools container (if orchestrator enabled)
+            if self.use_orchestrator and self.orchestrator:
+                print(f"Step 1: Creating dedicated Docker container for {container_id}...")
+                # We'll deploy the JAR later, so pass None for now
+                orchestration_result = self.orchestrator.create_drools_container(container_id, None)
+                result["orchestration"] = orchestration_result
+
+                if orchestration_result["status"] == "success":
+                    print(f"✓ Dedicated Docker container created: {orchestration_result.get('container_name')}")
+                elif orchestration_result["status"] == "exists":
+                    print(f"ℹ Docker container already exists: {container_id}")
+                else:
+                    print(f"⚠ Failed to create Docker container: {orchestration_result.get('message')}")
+                    # Continue anyway - may work with shared server
+            else:
+                print(f"Step 1: Skipping dedicated container creation (orchestrator disabled)")
+
+            # Step 2: Deploy each level as separate KIE container
+            levels = [
+                ("level1", level1_drl, "Critical/Knockout Rules"),
+                ("level2", level2_drl, "Standard/Important Rules"),
+                ("level3", level3_drl, "Preferred/Optimal Rules")
+            ]
+
+            all_jar_paths = []
+
+            for level_name, drl_content, level_description in levels:
+                print(f"\n{'-'*60}")
+                print(f"Step 2.{level_name[-1]}: Deploying {level_name.upper()} - {level_description}")
+                print(f"{'-'*60}")
+
+                # Create unique KIE container ID for this level
+                kie_container_id = f"{container_id}-{level_name}"
+                level_artifact_id = f"{artifact_id}-{level_name}"
+
+                # Build KJar for this level
+                level_result = {
+                    "kie_container_id": kie_container_id,
+                    "level_description": level_description,
+                    "steps": {}
+                }
+
+                # Save DRL file
+                drl_path = self.save_drl_file(drl_content, f"{kie_container_id}.drl", base_dir=temp_dir)
+                level_result["steps"]["save_drl"] = {"status": "success", "path": drl_path}
+
+                # Create KJar structure
+                kjar_dir = self.create_kjar_structure(
+                    drl_content, kie_container_id,
+                    group_id, level_artifact_id, version,
+                    base_dir=temp_dir
+                )
+                level_result["steps"]["create_kjar"] = {"status": "success", "path": kjar_dir}
+
+                # Build KJar with Maven
+                build_result = self.build_kjar(kjar_dir)
+                level_result["steps"]["build"] = build_result
+
+                if build_result["status"] != "success":
+                    level_result["status"] = "failed"
+                    level_result["message"] = f"Maven build failed for {level_name}"
+                    result["levels"][level_name] = level_result
+                    print(f"✗ Failed to build {level_name}")
+                    continue
+
+                # Copy JAR to persistent location
+                jar_path = build_result.get("jar_path")
+                if jar_path and os.path.exists(jar_path):
+                    jar_temp = tempfile.NamedTemporaryFile(suffix='.jar', delete=False)
+                    jar_temp.close()
+                    shutil.copy2(jar_path, jar_temp.name)
+                    level_result["steps"]["build"]["jar_path"] = jar_temp.name
+                    all_jar_paths.append((level_name, jar_temp.name, kie_container_id))
+                    print(f"✓ JAR built and copied: {jar_temp.name}")
+
+                # Copy DRL to persistent location
+                if drl_path and os.path.exists(drl_path):
+                    drl_temp = tempfile.NamedTemporaryFile(suffix='.drl', delete=False)
+                    drl_temp.close()
+                    shutil.copy2(drl_path, drl_temp.name)
+                    level_result["steps"]["save_drl"]["path"] = drl_temp.name
+
+                level_result["status"] = "built"
+                result["levels"][level_name] = level_result
+
+            # Step 3: Deploy all KJars to the Docker container / KIE Server
+            print(f"\n{'-'*60}")
+            print(f"Step 3: Deploying all KJars to {'dedicated container' if self.use_orchestrator else 'shared server'}")
+            print(f"{'-'*60}")
+
+            deployment_success_count = 0
+
+            for level_name, jar_path, kie_container_id in all_jar_paths:
+                level_artifact_id = f"{artifact_id}-{level_name}"
+
+                if self.use_orchestrator and self.orchestrator:
+                    # Deploy to dedicated Docker container
+                    print(f"Deploying {kie_container_id} to dedicated container...")
+                    deploy_result = self.orchestrator.deploy_kjar_to_container(
+                        container_id, jar_path, group_id, level_artifact_id, version
+                    )
+                    result["levels"][level_name]["steps"]["deploy_dedicated"] = deploy_result
+
+                    if deploy_result["status"] == "success":
+                        print(f"✓ {kie_container_id} deployed to dedicated container")
+                        result["levels"][level_name]["status"] = "deployed"
+                        deployment_success_count += 1
+                    else:
+                        print(f"✗ Failed to deploy {kie_container_id}: {deploy_result.get('message')}")
+                        result["levels"][level_name]["status"] = "deployment_failed"
+                else:
+                    # Deploy to shared KIE Server
+                    print(f"Deploying {kie_container_id} to shared server...")
+                    deploy_result = self.deploy_container(kie_container_id, group_id, level_artifact_id, version)
+                    result["levels"][level_name]["steps"]["deploy"] = deploy_result
+
+                    if deploy_result["status"] == "success":
+                        print(f"✓ {kie_container_id} deployed to shared server")
+                        result["levels"][level_name]["status"] = "deployed"
+                        deployment_success_count += 1
+                    else:
+                        print(f"✗ Failed to deploy {kie_container_id}")
+                        result["levels"][level_name]["status"] = "deployment_failed"
+
+            # Final status
+            if deployment_success_count == 3:
+                result["status"] = "success"
+                result["message"] = f"All 3 levels deployed successfully to container {container_id}"
+                print(f"\n{'='*60}")
+                print(f"✓ SUCCESS: Hierarchical deployment complete!")
+                print(f"{'='*60}")
+                print(f"Container ID: {container_id}")
+                print(f"  - Level 1 (Critical): {container_id}-level1")
+                print(f"  - Level 2 (Standard): {container_id}-level2")
+                print(f"  - Level 3 (Preferred): {container_id}-level3")
+            elif deployment_success_count > 0:
+                result["status"] = "partial"
+                result["message"] = f"Partial deployment: {deployment_success_count}/3 levels deployed"
+                print(f"\n⚠ PARTIAL SUCCESS: {deployment_success_count}/3 levels deployed")
+            else:
+                result["status"] = "failed"
+                result["message"] = "All deployments failed"
+                print(f"\n✗ FAILED: All deployments failed")
+
+            print(f"\n✓ Build directories will be auto-deleted: {temp_dir}")
+
+        return result

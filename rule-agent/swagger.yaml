@@ -356,6 +356,220 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/evaluate-policy-hierarchical:
+    post:
+      tags:
+        - Customer API
+      summary: Evaluate policy application (Hierarchical with short-circuit)
+      description: |
+        **Evaluate applications using hierarchical 3-level rule engine with short-circuit behavior.**
+
+        **How It Works:**
+        1. Execute Level 1 (Critical/Knockout) rules
+           - If rejected → Stop and return immediately
+           - If passed → Continue to Level 2
+        2. Execute Level 2 (Standard/Important) rules
+           - If rejected → Stop and return immediately
+           - If passed → Continue to Level 3
+        3. Execute Level 3 (Preferred/Optimal) rules
+           - Return final decision
+
+        **Benefits:**
+        - **Faster evaluation**: Stop immediately on rejection, no need to check all rules
+        - **Clear feedback**: Know exactly which level rejected the application
+        - **Prioritized rules**: Most important rules checked first
+
+        **Response includes:**
+        - `approved`: true/false
+        - `reasons`: List of rejection reasons
+        - `evaluation_metadata.rejection_level`: Which level rejected (1, 2, or 3)
+        - `evaluation_metadata.levels_evaluated`: List of levels that were executed
+        - `evaluation_metadata.short_circuit`: Whether evaluation stopped early
+      operationId: evaluatePolicyHierarchical
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - bank_id
+                - policy_type
+                - applicant
+              properties:
+                bank_id:
+                  type: string
+                  description: Bank identifier
+                  example: chase
+                policy_type:
+                  type: string
+                  description: Policy type identifier
+                  example: insurance
+                applicant:
+                  type: object
+                  description: Applicant data (field names must match DRL declarations)
+                  example:
+                    age: 35
+                    annualIncome: 75000
+                    creditScore: 720
+                    healthConditions: good
+                    smoker: false
+                policy:
+                  type: object
+                  description: Policy-specific data (optional, field names must match DRL)
+                  example:
+                    coverageAmount: 500000
+                    termYears: 20
+                    type: term_life
+            examples:
+              approved-all-levels:
+                summary: Application approved (all 3 levels passed)
+                value:
+                  bank_id: chase
+                  policy_type: insurance
+                  applicant:
+                    age: 35
+                    annualIncome: 75000
+                    creditScore: 720
+                    healthConditions: good
+                    smoker: false
+                  policy:
+                    coverageAmount: 500000
+                    termYears: 20
+                    type: term_life
+              rejected-level1:
+                summary: Rejected at Level 1 (Critical - Age)
+                value:
+                  bank_id: chase
+                  policy_type: insurance
+                  applicant:
+                    age: 17
+                    annualIncome: 75000
+                    creditScore: 720
+                    healthConditions: good
+                    smoker: false
+                  policy:
+                    coverageAmount: 500000
+                    termYears: 20
+                    type: term_life
+              rejected-level2:
+                summary: Rejected at Level 2 (Standard - Credit Score)
+                value:
+                  bank_id: chase
+                  policy_type: insurance
+                  applicant:
+                    age: 35
+                    annualIncome: 75000
+                    creditScore: 550
+                    healthConditions: good
+                    smoker: false
+                  policy:
+                    coverageAmount: 500000
+                    termYears: 20
+                    type: term_life
+      responses:
+        '200':
+          description: Hierarchical decision returned successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HierarchicalEvaluationResult'
+              examples:
+                approved:
+                  summary: Application approved (all levels passed)
+                  value:
+                    status: success
+                    bank_id: chase
+                    policy_type: insurance
+                    container_id: chase-insurance-rules
+                    evaluation_mode: hierarchical
+                    decision:
+                      approved: true
+                      reasons: []
+                      requiresManualReview: false
+                      premiumMultiplier: 1.0
+                      evaluation_metadata:
+                        levels_evaluated:
+                          - level: 1
+                            level_name: level1
+                            description: Critical/Knockout Rules
+                            kie_container_id: chase-insurance-rules-level1
+                          - level: 2
+                            level_name: level2
+                            description: Standard/Important Rules
+                            kie_container_id: chase-insurance-rules-level2
+                          - level: 3
+                            level_name: level3
+                            description: Preferred/Optimal Rules
+                            kie_container_id: chase-insurance-rules-level3
+                        rejection_level: null
+                        short_circuit: false
+                    execution_time_ms: 125
+                rejected-level1:
+                  summary: Rejected at Level 1 (Critical)
+                  value:
+                    status: success
+                    bank_id: chase
+                    policy_type: insurance
+                    container_id: chase-insurance-rules
+                    evaluation_mode: hierarchical
+                    decision:
+                      approved: false
+                      reasons:
+                        - "Applicant age (17) is below minimum required age (18)"
+                      requiresManualReview: false
+                      premiumMultiplier: 1.0
+                      evaluation_metadata:
+                        levels_evaluated:
+                          - level: 1
+                            level_name: level1
+                            description: Critical/Knockout Rules
+                            kie_container_id: chase-insurance-rules-level1
+                        rejection_level: 1
+                        rejection_level_name: level1
+                        short_circuit: true
+                    execution_time_ms: 42
+                rejected-level2:
+                  summary: Rejected at Level 2 (Standard)
+                  value:
+                    status: success
+                    bank_id: chase
+                    policy_type: insurance
+                    container_id: chase-insurance-rules
+                    evaluation_mode: hierarchical
+                    decision:
+                      approved: false
+                      reasons:
+                        - "Credit score (550) is below minimum required (600)"
+                      requiresManualReview: false
+                      premiumMultiplier: 1.0
+                      evaluation_metadata:
+                        levels_evaluated:
+                          - level: 1
+                            level_name: level1
+                            description: Critical/Knockout Rules
+                            kie_container_id: chase-insurance-rules-level1
+                          - level: 2
+                            level_name: level2
+                            description: Standard/Important Rules
+                            kie_container_id: chase-insurance-rules-level2
+                        rejection_level: 2
+                        rejection_level_name: level2
+                        short_circuit: true
+                    execution_time_ms: 78
+        '404':
+          description: No rules deployed for this bank+policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Rule container unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/v1/discovery:
     get:
       tags:
@@ -448,18 +662,21 @@ paths:
                     items:
                       $ref: '#/components/schemas/ExtractedRule'
               examples:
-                insurance-rules:
-                  summary: Insurance underwriting rules
+                single-level-rules:
+                  summary: Single-level insurance rules (legacy)
                   value:
                     status: success
                     bank_id: chase
                     policy_type: insurance
+                    hierarchical: false
                     rule_count: 3
                     rules:
                       - id: 1
                         rule_name: Minimum Age Requirement
                         requirement: Applicant must be at least 18 years old (MANDATORY - Applications under 18 are AUTOMATICALLY REJECTED)
                         category: Age Requirements
+                        level: null
+                        level_description: Single-level (non-hierarchical)
                         source_document: sample_life_insurance_policy.txt
                         document_hash: abc123def456
                         extraction_timestamp: "2025-11-10T10:30:00"
@@ -470,6 +687,8 @@ paths:
                         rule_name: Minimum Credit Score
                         requirement: Credit score must be at least 600 (MANDATORY - Applications under 600 are AUTOMATICALLY REJECTED)
                         category: Credit Score Requirements
+                        level: null
+                        level_description: Single-level (non-hierarchical)
                         source_document: sample_life_insurance_policy.txt
                         document_hash: abc123def456
                         extraction_timestamp: "2025-11-10T10:30:00"
@@ -480,12 +699,103 @@ paths:
                         rule_name: Minimum Annual Income
                         requirement: Annual income must be at least $25,000
                         category: Income Requirements
+                        level: null
+                        level_description: Single-level (non-hierarchical)
                         source_document: sample_life_insurance_policy.txt
                         document_hash: abc123def456
                         extraction_timestamp: "2025-11-10T10:30:00"
                         is_active: true
                         created_at: "2025-11-10T10:30:00"
                         updated_at: "2025-11-10T10:30:00"
+                hierarchical-rules:
+                  summary: Hierarchical 3-level insurance rules
+                  value:
+                    status: success
+                    bank_id: chase
+                    policy_type: insurance
+                    hierarchical: true
+                    rule_count: 12
+                    rules:
+                      - id: 4
+                        rule_name: L1 Minimum Age Requirement
+                        requirement: Applicant must be at least 18 years old
+                        category: Age Requirements
+                        level: 1
+                        level_description: Critical/Knockout Rules
+                        source_document: sample_life_insurance_policy.txt
+                        document_hash: abc123def456
+                        extraction_timestamp: "2025-11-11T14:30:00"
+                        is_active: true
+                        created_at: "2025-11-11T14:30:00"
+                        updated_at: "2025-11-11T14:30:00"
+                      - id: 5
+                        rule_name: L1 Maximum Age Requirement
+                        requirement: Applicant must be under 75 years old
+                        category: Age Requirements
+                        level: 1
+                        level_description: Critical/Knockout Rules
+                        source_document: sample_life_insurance_policy.txt
+                        document_hash: abc123def456
+                        extraction_timestamp: "2025-11-11T14:30:00"
+                        is_active: true
+                        created_at: "2025-11-11T14:30:00"
+                        updated_at: "2025-11-11T14:30:00"
+                      - id: 6
+                        rule_name: L2 Minimum Credit Score
+                        requirement: Credit score must be at least 600
+                        category: Credit Score Requirements
+                        level: 2
+                        level_description: Standard/Important Rules
+                        source_document: sample_life_insurance_policy.txt
+                        document_hash: abc123def456
+                        extraction_timestamp: "2025-11-11T14:30:00"
+                        is_active: true
+                        created_at: "2025-11-11T14:30:00"
+                        updated_at: "2025-11-11T14:30:00"
+                      - id: 7
+                        rule_name: L2 Income to Coverage Ratio
+                        requirement: Coverage amount should not exceed 20x annual income
+                        category: Income Requirements
+                        level: 2
+                        level_description: Standard/Important Rules
+                        source_document: sample_life_insurance_policy.txt
+                        document_hash: abc123def456
+                        extraction_timestamp: "2025-11-11T14:30:00"
+                        is_active: true
+                        created_at: "2025-11-11T14:30:00"
+                        updated_at: "2025-11-11T14:30:00"
+                      - id: 8
+                        rule_name: L3 Premium Discount for Non-Smokers
+                        requirement: Non-smokers qualify for 10% premium discount
+                        category: Premium Adjustments
+                        level: 3
+                        level_description: Preferred/Optimal Rules
+                        source_document: sample_life_insurance_policy.txt
+                        document_hash: abc123def456
+                        extraction_timestamp: "2025-11-11T14:30:00"
+                        is_active: true
+                        created_at: "2025-11-11T14:30:00"
+                        updated_at: "2025-11-11T14:30:00"
+                    rules_by_level:
+                      level1:
+                        - id: 4
+                          rule_name: L1 Minimum Age Requirement
+                        - id: 5
+                          rule_name: L1 Maximum Age Requirement
+                      level2:
+                        - id: 6
+                          rule_name: L2 Minimum Credit Score
+                        - id: 7
+                          rule_name: L2 Income to Coverage Ratio
+                      level3:
+                        - id: 8
+                          rule_name: L3 Premium Discount for Non-Smokers
+                      single_level: []
+                    level_counts:
+                      level1: 2
+                      level2: 2
+                      level3: 1
+                      single_level: 0
         '400':
           description: Missing required parameters
           content:
@@ -510,9 +820,9 @@ paths:
     post:
       tags:
         - Admin - Workflow
-      summary: Process policy document from S3
+      summary: Process policy document from S3 (Single-level rules)
       description: |
-        **Admin endpoint:** Process a policy PDF from S3 and generate rules.
+        **Admin endpoint:** Process a policy PDF from S3 and generate single-level rules.
 
         Workflow:
         1. Extract text from S3 PDF
@@ -553,6 +863,66 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/WorkflowResult'
+
+  /process_policy_from_s3_hierarchical:
+    post:
+      tags:
+        - Admin - Workflow
+      summary: Process policy document from S3 (Hierarchical 3-level rules)
+      description: |
+        **Admin endpoint:** Process a policy PDF from S3 and generate hierarchical 3-level rules with short-circuit evaluation.
+
+        **Hierarchical Rule Levels:**
+        - **Level 1 (Critical/Knockout)**: Must-pass rules that immediately disqualify applications (age limits, citizenship, license validity)
+        - **Level 2 (Standard/Important)**: Important risk assessment rules (income ratios, credit scores, occupation risks)
+        - **Level 3 (Preferred/Optimal)**: Fine-grained adjustments (premium discounts, loyalty bonuses)
+
+        **Short-Circuit Behavior:**
+        - If Level 1 fails → Stop immediately, don't execute Level 2 or 3
+        - If Level 2 fails → Stop immediately, don't execute Level 3
+        - Only execute all 3 levels if each level passes
+
+        **Workflow:**
+        1. Extract text from S3 PDF
+        2. LLM analyzes and generates extraction queries
+        3. AWS Textract extracts structured data
+        4. LLM generates 3 separate DRL files (Level 1, Level 2, Level 3)
+        5. Deploy all 3 levels to ONE Docker container with 3 separate KIE containers inside:
+           - `{container_id}-level1` (Critical rules)
+           - `{container_id}-level2` (Standard rules)
+           - `{container_id}-level3` (Preferred rules)
+        6. Upload artifacts to S3
+        7. Register in PostgreSQL database
+        8. Save extracted rules with level information (1, 2, or 3)
+      operationId: processPolicyFromS3Hierarchical
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - s3_url
+                - policy_type
+                - bank_id
+              properties:
+                s3_url:
+                  type: string
+                  format: uri
+                  example: s3://bucket/policies/chase-insurance.pdf
+                policy_type:
+                  type: string
+                  example: insurance
+                bank_id:
+                  type: string
+                  example: chase
+      responses:
+        '200':
+          description: Hierarchical workflow completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HierarchicalWorkflowResult'
 
   /upload_file:
       post:
@@ -978,6 +1348,15 @@ components:
           type: string
           description: Category for grouping rules
           example: Age Requirements
+        level:
+          type: integer
+          nullable: true
+          description: Hierarchical rule level (1=Critical/Knockout, 2=Standard/Important, 3=Preferred/Optimal, null=Single-level)
+          example: 1
+        level_description:
+          type: string
+          description: Human-readable description of the level (added by API, not stored in DB)
+          example: Critical/Knockout Rules
         source_document:
           type: string
           description: Source document path or name from which the rule was extracted
@@ -1005,6 +1384,151 @@ components:
           format: date-time
           description: Timestamp when the record was last updated
           example: "2025-11-10T10:30:00"
+
+    HierarchicalWorkflowResult:
+      type: object
+      properties:
+        s3_url:
+          type: string
+        policy_type:
+          type: string
+        bank_id:
+          type: string
+        container_id:
+          type: string
+        hierarchical:
+          type: boolean
+          example: true
+        status:
+          type: string
+          enum: [in_progress, completed, failed, partial]
+        levels:
+          type: object
+          properties:
+            level1:
+              $ref: '#/components/schemas/LevelDeploymentInfo'
+            level2:
+              $ref: '#/components/schemas/LevelDeploymentInfo'
+            level3:
+              $ref: '#/components/schemas/LevelDeploymentInfo'
+        steps:
+          type: object
+
+    LevelDeploymentInfo:
+      type: object
+      properties:
+        kie_container_id:
+          type: string
+          example: chase-insurance-rules-level1
+        level_description:
+          type: string
+          example: Critical/Knockout Rules
+        status:
+          type: string
+          enum: [built, deployed, failed, deployment_failed]
+        steps:
+          type: object
+          properties:
+            save_drl:
+              type: object
+              properties:
+                status:
+                  type: string
+                path:
+                  type: string
+            create_kjar:
+              type: object
+              properties:
+                status:
+                  type: string
+                path:
+                  type: string
+            build:
+              type: object
+              properties:
+                status:
+                  type: string
+                jar_path:
+                  type: string
+            deploy:
+              type: object
+              properties:
+                status:
+                  type: string
+
+    HierarchicalEvaluationResult:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        bank_id:
+          type: string
+        policy_type:
+          type: string
+        container_id:
+          type: string
+        evaluation_mode:
+          type: string
+          example: hierarchical
+        decision:
+          $ref: '#/components/schemas/HierarchicalDecision'
+        execution_time_ms:
+          type: integer
+          example: 125
+
+    HierarchicalDecision:
+      type: object
+      properties:
+        approved:
+          type: boolean
+          example: true
+        reasons:
+          type: array
+          items:
+            type: string
+          example: []
+        requiresManualReview:
+          type: boolean
+          example: false
+        premiumMultiplier:
+          type: number
+          format: double
+          example: 1.0
+        evaluation_metadata:
+          type: object
+          properties:
+            levels_evaluated:
+              type: array
+              items:
+                type: object
+                properties:
+                  level:
+                    type: integer
+                    example: 1
+                  level_name:
+                    type: string
+                    example: level1
+                  description:
+                    type: string
+                    example: Critical/Knockout Rules
+                  kie_container_id:
+                    type: string
+                    example: chase-insurance-rules-level1
+            rejection_level:
+              type: integer
+              nullable: true
+              description: Which level rejected the application (1, 2, 3, or null if approved)
+              example: null
+            rejection_level_name:
+              type: string
+              nullable: true
+              description: Name of the level that rejected (level1, level2, level3, or null)
+              example: null
+            short_circuit:
+              type: boolean
+              description: Whether evaluation stopped early due to rejection
+              example: false
 
     Error:
       type: object

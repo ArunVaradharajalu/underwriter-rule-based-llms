@@ -414,3 +414,137 @@ class DroolsService(RuleService):
 
         print(f"✗ Failed to connect to Drools Server after {max_retries} attempts")
         return False
+
+    def evaluate_with_levels(self, container_id: str, decisionInputs: dict,
+                            session_path: str = "/ksession/stateless/kie-session/executeCommand") -> dict:
+        """
+        Evaluate rules hierarchically across 3 levels with short-circuit behavior
+
+        Executes rules level by level, stopping immediately if any level rejects the application:
+        - Level 1 (Critical): If rejected, stop and return
+        - Level 2 (Standard): Only execute if Level 1 passed, if rejected, stop and return
+        - Level 3 (Preferred): Only execute if Level 1 and 2 passed
+
+        :param container_id: Base container ID (e.g., 'chase-life-insurance-rules')
+        :param decisionInputs: Dictionary of input parameters (applicant, policy, etc.)
+        :param session_path: KIE session path (default stateless session)
+        :return: Decision result with rejection_level metadata
+        """
+
+        print(f"\n{'='*60}")
+        print(f"HIERARCHICAL RULE EVALUATION: {container_id}")
+        print(f"{'='*60}")
+
+        levels = [
+            ("level1", "Critical/Knockout Rules"),
+            ("level2", "Standard/Important Rules"),
+            ("level3", "Preferred/Optimal Rules")
+        ]
+
+        final_result = {
+            "approved": True,
+            "reasons": [],
+            "requiresManualReview": False,
+            "premiumMultiplier": 1.0,
+            "evaluation_metadata": {
+                "levels_evaluated": [],
+                "rejection_level": None,
+                "short_circuit": False
+            }
+        }
+
+        for level_name, level_description in levels:
+            kie_container_id = f"{container_id}-{level_name}"
+            level_number = int(level_name[-1])
+
+            print(f"\n{'-'*60}")
+            print(f"Evaluating {level_name.upper()}: {level_description}")
+            print(f"KIE Container: {kie_container_id}")
+            print(f"{'-'*60}")
+
+            # Build the full path for this level's KIE container
+            level_path = f"/kie-server/services/rest/server/containers/{kie_container_id}{session_path}"
+
+            try:
+                # Invoke this level's rules
+                level_result = self.invokeDecisionService(level_path, decisionInputs)
+
+                # Track that this level was evaluated
+                final_result["evaluation_metadata"]["levels_evaluated"].append({
+                    "level": level_number,
+                    "level_name": level_name,
+                    "description": level_description,
+                    "kie_container_id": kie_container_id
+                })
+
+                # Extract decision from result
+                approved = level_result.get("approved", True)
+                reasons = level_result.get("reasons", [])
+                requires_manual_review = level_result.get("requiresManualReview", False)
+                premium_multiplier = level_result.get("premiumMultiplier", 1.0)
+
+                print(f"Level {level_number} Result:")
+                print(f"  Approved: {approved}")
+                print(f"  Reasons: {reasons if reasons else 'None'}")
+                print(f"  Manual Review: {requires_manual_review}")
+                print(f"  Premium Multiplier: {premium_multiplier}")
+
+                # Accumulate reasons
+                if reasons:
+                    final_result["reasons"].extend(reasons)
+
+                # Update other fields (take most restrictive values)
+                if requires_manual_review:
+                    final_result["requiresManualReview"] = True
+
+                # Multiply premium multipliers (cumulative effect)
+                if premium_multiplier != 1.0:
+                    final_result["premiumMultiplier"] *= premium_multiplier
+
+                # SHORT-CIRCUIT: If this level rejected, stop immediately
+                if not approved:
+                    final_result["approved"] = False
+                    final_result["evaluation_metadata"]["rejection_level"] = level_number
+                    final_result["evaluation_metadata"]["rejection_level_name"] = level_name
+                    final_result["evaluation_metadata"]["short_circuit"] = True
+
+                    print(f"\n{'='*60}")
+                    print(f"❌ APPLICATION REJECTED AT LEVEL {level_number}")
+                    print(f"{'='*60}")
+                    print(f"Rejection Level: {level_name} ({level_description})")
+                    print(f"Reasons: {reasons}")
+                    print(f"Evaluation stopped - Levels {level_number+1}-3 NOT evaluated")
+                    print(f"{'='*60}")
+
+                    return final_result
+
+                else:
+                    print(f"✓ Level {level_number} PASSED - Continue to next level")
+
+            except Exception as e:
+                print(f"✗ Error evaluating level {level_number}: {e}")
+                final_result["evaluation_metadata"]["levels_evaluated"].append({
+                    "level": level_number,
+                    "level_name": level_name,
+                    "description": level_description,
+                    "kie_container_id": kie_container_id,
+                    "error": str(e)
+                })
+                # Treat errors as rejection
+                final_result["approved"] = False
+                final_result["reasons"].append(f"Error evaluating {level_description}: {str(e)}")
+                final_result["evaluation_metadata"]["rejection_level"] = level_number
+                final_result["evaluation_metadata"]["rejection_level_name"] = level_name
+                final_result["evaluation_metadata"]["short_circuit"] = True
+                return final_result
+
+        # All levels passed!
+        print(f"\n{'='*60}")
+        print(f"✓ APPLICATION APPROVED - All levels passed")
+        print(f"{'='*60}")
+        print(f"Levels evaluated: 1, 2, 3")
+        print(f"Final premium multiplier: {final_result['premiumMultiplier']}")
+        print(f"Requires manual review: {final_result['requiresManualReview']}")
+        print(f"{'='*60}")
+
+        return final_result

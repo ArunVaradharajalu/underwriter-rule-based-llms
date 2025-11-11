@@ -195,6 +195,7 @@ class ExtractedRule(Base):
     rule_name = Column(String(255), nullable=False)
     requirement = Column(Text, nullable=False)
     category = Column(String(100))
+    level = Column(Integer, nullable=True)  # 1, 2, 3 for hierarchical rules; NULL for single-level
     source_document = Column(String(500))
 
     # Metadata
@@ -214,6 +215,8 @@ class ExtractedRule(Base):
         Index('idx_extracted_rules_bank_policy', 'bank_id', 'policy_type_id'),
         Index('idx_extracted_rules_active', 'is_active'),
         Index('idx_extracted_rules_created_at', 'created_at'),
+        Index('idx_extracted_rules_level', 'level'),
+        Index('idx_extracted_rules_bank_policy_level', 'bank_id', 'policy_type_id', 'level'),
     )
 
 

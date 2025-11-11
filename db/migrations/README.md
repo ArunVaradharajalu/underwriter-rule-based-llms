@@ -157,3 +157,167 @@ If you need to rollback the migration:
 - Old rules are soft-deleted (is_active = FALSE) when new rules are saved for the same bank/policy combination
 - All timestamps are stored in UTC
 - The table uses CASCADE delete to automatically remove rules when a bank or policy type is deleted
+
+---
+
+## Migration 002: Add Level Column for Hierarchical Rules
+
+### Purpose
+Add a dedicated `level` column to the `extracted_rules` table to support hierarchical rule evaluation (Level 1: Critical, Level 2: Standard, Level 3: Preferred).
+
+### Files
+
+1. **002_add_level_column_to_extracted_rules.sql** - Main migration script
+   - Adds `level` INTEGER column (nullable for backwards compatibility)
+   - Creates indexes for efficient level-based queries
+   - Migrates existing data (extracts level from category field if present)
+   - Adds column documentation
+
+2. **002_rollback_level_column.sql** - Rollback script
+   - Drops the `level` column and related indexes
+   - Use this if you need to undo the migration
+
+### How to Run in pgAdmin
+
+#### Step 1: Run the Main Migration
+
+1. Open pgAdmin and connect to your PostgreSQL database
+2. Navigate to your database (e.g., `underwriter_db`)
+3. Open the Query Tool (Tools > Query Tool)
+4. Open the file: `002_add_level_column_to_extracted_rules.sql`
+5. Click "Execute" (F5) to run the script
+6. Verify success by checking the messages tab
+
+#### Step 2: Verify the Column
+
+Run this query to verify the column was added:
+
+```sql
+-- Check column exists
+SELECT
+    column_name,
+    data_type,
+    is_nullable,
+    column_default
+FROM information_schema.columns
+WHERE table_name = 'extracted_rules' AND column_name = 'level';
+
+-- Check level distribution
+SELECT
+    level,
+    COUNT(*) as rule_count
+FROM extracted_rules
+GROUP BY level
+ORDER BY level NULLS LAST;
+```
+
+### Updated Table Schema
+
+```sql
+extracted_rules
+├── id (SERIAL PRIMARY KEY)
+├── bank_id (VARCHAR(50), FK to banks.bank_id)
+├── policy_type_id (VARCHAR(50), FK to policy_types.policy_type_id)
+├── rule_name (VARCHAR(255))
+├── requirement (TEXT)
+├── category (VARCHAR(100))
+├── level (INTEGER) ← NEW!
+├── source_document (VARCHAR(500))
+├── document_hash (VARCHAR(64))
+├── extraction_timestamp (TIMESTAMP)
+├── is_active (BOOLEAN)
+├── created_at (TIMESTAMP)
+└── updated_at (TIMESTAMP)
+```
+
+### Level Values
+
+- `1` - Critical/Knockout Rules (must pass to continue)
+- `2` - Standard/Important Rules (checked only if Level 1 passes)
+- `3` - Preferred/Optimal Rules (checked only if Level 1 and 2 pass)
+- `NULL` - Single-level rules (non-hierarchical, legacy)
+
+### New Indexes
+
+- `idx_extracted_rules_level` - Index on level column
+- `idx_extracted_rules_bank_policy_level` - Composite index on (bank_id, policy_type_id, level)
+
+### Updated API Response
+
+After running the migration, the `/api/v1/extracted-rules` endpoint returns:
+
+```json
+{
+  "status": "success",
+  "hierarchical": true,
+  "rules": [
+    {
+      "id": 1,
+      "rule_name": "L1: Minimum Age Requirement",
+      "requirement": "Applicant must be at least 18 years old",
+      "category": "Age Requirements",
+      "level": 1,
+      "level_description": "Critical/Knockout Rules",
+      ...
+    }
+  ],
+  "rules_by_level": {
+    "level1": [...],
+    "level2": [...],
+    "level3": [...],
+    "single_level": [...]
+  },
+  "level_counts": {
+    "level1": 3,
+    "level2": 5,
+    "level3": 4,
+    "single_level": 0
+  }
+}
+```
+
+### SQL Queries
+
+```sql
+-- Get all critical rules for a bank
+SELECT * FROM extracted_rules
+WHERE bank_id = 'chase'
+  AND policy_type_id = 'life_insurance'
+  AND level = 1;
+
+-- Count rules by level
+SELECT
+    level,
+    CASE
+        WHEN level = 1 THEN 'Critical/Knockout'
+        WHEN level = 2 THEN 'Standard/Important'
+        WHEN level = 3 THEN 'Preferred/Optimal'
+        ELSE 'Single-level (legacy)'
+    END as level_description,
+    COUNT(*) as count
+FROM extracted_rules
+GROUP BY level
+ORDER BY level NULLS LAST;
+
+-- Get hierarchical rules only (exclude single-level)
+SELECT * FROM extracted_rules
+WHERE level IS NOT NULL
+ORDER BY level, rule_name;
+```
+
+### Rollback Instructions
+
+If you need to rollback the migration:
+
+1. Open pgAdmin Query Tool
+2. Open the file: `002_rollback_level_column.sql`
+3. Click "Execute" (F5)
+4. Verify success by checking the messages tab
+
+⚠️ **Warning**: Rollback will delete the `level` column and all level information!
+
+### Backwards Compatibility
+
+- Existing rules without a level will have `level = NULL`
+- The migration script attempts to extract level from the `category` field (e.g., "Level 1 - Age Requirements")
+- Non-hierarchical rules continue to work as before

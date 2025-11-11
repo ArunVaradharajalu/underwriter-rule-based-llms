@@ -648,3 +648,220 @@ Now transform the rule above:"""
 
         return rules_list
 
+    def process_policy_document_hierarchical(self, s3_url: str,
+                                             policy_type: str = "general",
+                                             bank_id: str = None) -> Dict:
+        """
+        Complete workflow to process a policy document and generate HIERARCHICAL rules (3 levels)
+
+        This method generates rules at 3 priority levels:
+        - Level 1: Critical/Knockout rules (must pass to continue)
+        - Level 2: Standard/Important rules (must pass to continue)
+        - Level 3: Preferred/Optimal rules (fine adjustments)
+
+        :param s3_url: S3 URL to policy PDF (required)
+        :param policy_type: Type of policy (general, life, health, auto, property, loan, insurance, etc.)
+        :param bank_id: Bank/Tenant identifier (e.g., 'chase', 'bofa', 'wells-fargo')
+        :return: Result dictionary with all workflow steps
+        """
+
+        # Auto-generate container_id
+        normalized_type = policy_type.lower().strip().replace(' ', '-')
+
+        if bank_id:
+            normalized_bank = bank_id.lower().strip().replace(' ', '-')
+            container_id = f"{normalized_bank}-{normalized_type}-underwriting-rules"
+            print(f"Auto-generated container ID (with bank): {container_id}")
+        else:
+            container_id = f"{normalized_type}-underwriting-rules"
+            print(f"Auto-generated container ID (no bank): {container_id}")
+            print("Warning: No bank_id provided. Consider specifying bank_id for multi-tenant deployments.")
+
+        result = {
+            "s3_url": s3_url,
+            "policy_type": policy_type,
+            "bank_id": bank_id,
+            "container_id": container_id,
+            "hierarchical": True,
+            "steps": {},
+            "status": "in_progress"
+        }
+
+        try:
+            # Parse S3 URL
+            print("\n" + "="*60)
+            print("Step 0: Parsing S3 URL...")
+            print("="*60)
+
+            s3_info = self.s3_service.parse_s3_url(s3_url)
+            if "error" in s3_info:
+                result["status"] = "failed"
+                result["error"] = s3_info["error"]
+                return result
+
+            s3_bucket = s3_info["bucket"]
+            s3_key = s3_info["key"]
+            print(f"✓ S3 bucket: {s3_bucket}")
+            print(f"✓ S3 key: {s3_key}")
+            result["s3_bucket"] = s3_bucket
+            result["s3_key"] = s3_key
+
+            # Step 1: Extract text from PDF
+            print("\n" + "="*60)
+            print("Step 1: Extracting text from PDF from S3...")
+            print("="*60)
+
+            document_text = self._extract_text_from_s3(s3_key)
+
+            result["steps"]["text_extraction"] = {
+                "status": "success",
+                "length": len(document_text),
+                "preview": document_text[:500] + "..." if len(document_text) > 500 else document_text
+            }
+            print(f"✓ Extracted {len(document_text)} characters")
+
+            # Compute document hash
+            document_hash = hashlib.sha256(document_text.encode('utf-8')).hexdigest()
+            result["document_hash"] = document_hash
+
+            # Step 2: LLM generates extraction queries
+            print("\n" + "="*60)
+            print("Step 2: LLM analyzing document and generating extraction queries...")
+            print("="*60)
+
+            analysis = self.policy_analyzer.analyze_policy(document_text)
+            queries = analysis.get("queries", [])
+            result["steps"]["query_generation"] = {
+                "status": "success",
+                "method": "llm_generated",
+                "queries": queries,
+                "count": len(queries),
+                "key_sections": analysis.get("key_sections", []),
+                "rule_categories": analysis.get("rule_categories", [])
+            }
+
+            print(f"✓ LLM generated {len(queries)} custom queries")
+
+            # Step 3: Extract structured data using AWS Textract
+            print("\n" + "="*60)
+            print("Step 3: Extracting structured data with AWS Textract...")
+            print("="*60)
+
+            if len(queries) == 0:
+                raise ValueError("No extraction queries generated. Cannot proceed with data extraction.")
+
+            extracted_data = self.textract.analyze_document(
+                s3_bucket=s3_bucket,
+                s3_key=s3_key,
+                queries=queries
+            )
+
+            result["steps"]["data_extraction"] = {
+                "status": "success",
+                "method": "textract",
+                "data": extracted_data
+            }
+            print(f"✓ Extracted data from {len(queries)} queries using AWS Textract")
+
+            # Step 4: Generate HIERARCHICAL Drools rules (3 levels)
+            print("\n" + "="*60)
+            print("Step 4: Generating HIERARCHICAL Drools rules (3 levels)...")
+            print("="*60)
+
+            hierarchical_rules = self.rule_generator.generate_hierarchical_rules(extracted_data)
+            result["steps"]["rule_generation"] = {
+                "status": "success",
+                "hierarchical": hierarchical_rules.get('hierarchical', False),
+                "level1_drl_length": len(hierarchical_rules.get('level1_drl', '')),
+                "level2_drl_length": len(hierarchical_rules.get('level2_drl', '')),
+                "level3_drl_length": len(hierarchical_rules.get('level3_drl', '')),
+                "explanation": hierarchical_rules.get('explanation', '')
+            }
+            print(f"✓ Generated Level 1 DRL rules ({len(hierarchical_rules.get('level1_drl', ''))} characters)")
+            print(f"✓ Generated Level 2 DRL rules ({len(hierarchical_rules.get('level2_drl', ''))} characters)")
+            print(f"✓ Generated Level 3 DRL rules ({len(hierarchical_rules.get('level3_drl', ''))} characters)")
+
+            # Step 4.5: Save extracted rules to database (from all 3 DRL files)
+            if bank_id and policy_type:
+                try:
+                    print("\n" + "="*60)
+                    print("Step 4.5: Parsing and saving rules from all levels to database...")
+                    print("="*60)
+
+                    all_rules = []
+                    for level_num, level_key in [(1, 'level1_drl'), (2, 'level2_drl'), (3, 'level3_drl')]:
+                        drl_content = hierarchical_rules.get(level_key, '')
+                        if drl_content:
+                            level_rules = self._parse_drl_rules(drl_content)
+                            # Add level information to each rule as a dedicated field
+                            for rule in level_rules:
+                                rule['level'] = level_num
+                            all_rules.extend(level_rules)
+
+                    if all_rules:
+                        saved_ids = self.db_service.save_extracted_rules(
+                            bank_id=bank_id,
+                            policy_type_id=policy_type,
+                            rules=all_rules,
+                            source_document=s3_key,
+                            document_hash=document_hash
+                        )
+
+                        print(f"✓ Saved {len(saved_ids)} hierarchical rules to database")
+                        result["steps"]["save_drools_rules"] = {
+                            "status": "success",
+                            "count": len(saved_ids),
+                            "rule_ids": saved_ids
+                        }
+
+                except Exception as e:
+                    print(f"⚠ Failed to save rules to database: {e}")
+                    result["steps"]["save_drools_rules"] = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+
+            # Step 5: Automated HIERARCHICAL deployment to Drools KIE Server
+            print("\n" + "="*60)
+            print("Step 5: Automated HIERARCHICAL deployment to Drools KIE Server...")
+            print("="*60)
+
+            deployment_result = self.drools_deployment.deploy_hierarchical_rules_automatically(
+                level1_drl=hierarchical_rules['level1_drl'],
+                level2_drl=hierarchical_rules['level2_drl'],
+                level3_drl=hierarchical_rules['level3_drl'],
+                container_id=container_id
+            )
+            result["steps"]["deployment"] = deployment_result
+
+            if deployment_result["status"] == "success":
+                print(f"✓ Hierarchical rules automatically deployed to container '{container_id}'")
+                result["status"] = "success"
+            elif deployment_result["status"] == "partial":
+                print(f"⚠ Partial success: {deployment_result['message']}")
+                result["status"] = "partial"
+            else:
+                print(f"✗ Deployment failed: {deployment_result.get('message', 'Unknown error')}")
+                result["status"] = "failed"
+
+            # Step 6: Hierarchical deployment complete
+            print("\n" + "="*60)
+            print("Step 6: Hierarchical deployment complete")
+            print("="*60)
+            print(f"✓ Container: {container_id}")
+            print(f"✓ Level 1 KIE Container: {container_id}-level1")
+            print(f"✓ Level 2 KIE Container: {container_id}-level2")
+            print(f"✓ Level 3 KIE Container: {container_id}-level3")
+
+            result["message"] = f"Hierarchical rules deployed successfully: {container_id}"
+            print(f"\n✓ Workflow complete!")
+
+        except Exception as e:
+            print(f"\n✗ Workflow failed: {e}")
+            import traceback
+            traceback.print_exc()
+            result["status"] = "failed"
+            result["error"] = str(e)
+
+        return result
+

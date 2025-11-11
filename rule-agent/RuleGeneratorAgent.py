@@ -28,14 +28,35 @@ class RuleGeneratorAgent:
     def __init__(self, llm):
         self.llm = llm
 
-        self.rule_generation_prompt = ChatPromptTemplate.from_messages([
+        # New prompt for hierarchical rule generation
+        self.hierarchical_rule_generation_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are an expert in insurance underwriting rules and Drools rule engine.
 
-Given extracted policy data, generate executable Drools DRL (Drools Rule Language) rules.
+Given extracted policy data, generate executable Drools DRL (Drools Rule Language) rules organized into THREE PRIORITY LEVELS.
+
+**CRITICAL: Rules must be categorized into 3 levels based on importance:**
+
+**LEVEL 1 - Critical/Knockout Rules (Most Important)**
+- Rules that immediately disqualify an application
+- Hard requirements that MUST be met
+- Examples: Minimum age, maximum age, citizenship requirements, license validity, property existence
+- These are "showstoppers" - if any fail, no need to check further rules
+
+**LEVEL 2 - Standard/Important Rules**
+- Important risk assessment rules
+- Policy limits and standard underwriting criteria
+- Examples: Income vs coverage ratios, occupation risk categories, credit score thresholds, property condition
+- These are checked only if Level 1 passes
+
+**LEVEL 3 - Preferred/Optimal Rules**
+- Nice-to-have criteria for preferred rates
+- Fine-grained risk adjustments
+- Examples: Premium adjustments for lifestyle factors, discounts for bundling, loyalty bonuses
+- These are checked only if Level 1 and Level 2 pass
 
 IMPORTANT: Use 'declare' statements to define types directly in the DRL file. Do NOT import external Java classes.
 
-The rules should follow this structure:
+Each level should be a complete, self-contained DRL file with the following structure:
 
 ```drl
 package com.underwriting.rules;
@@ -107,21 +128,173 @@ rule "Age and Coverage Combined Check"
 end
 ```
 
+Guidelines for EACH level:
+1. ALWAYS use 'declare' statements to define Applicant, Policy, and Decision types at the top of EACH DRL file
+2. Do NOT use import statements for model classes
+3. **CRITICAL**: Every field you reference in rules MUST be declared in the type definition. If you use `loanType` in a rule, you MUST add `loanType: String` in the declare statement.
+4. **CRITICAL**: Before writing rules, first decide ALL fields needed and add them to the declare statements. Then write rules using only those declared fields.
+5. **CRITICAL**: The same declare statements must be in ALL three levels with the SAME fields. Don't add fields in level 2 that weren't in level 1.
+6. Include an "Initialize Decision" rule in EACH level that creates the Decision object if it doesn't exist
+7. Use proper getter/setter methods (e.g., setApproved(), getReasons().add("reason"))
+8. For rejection rules, use $decision.getReasons().add("reason text") to accumulate ALL rejection reasons
+9. NEVER use setReason() or setReasons() - always use getReasons().add() to preserve all reasons
+10. When comparing fields from different objects, use variable binding
+11. Create clear, specific rule names with level indicator (e.g., "L1: Age Requirement Check")
+
+**IMPORTANT OUTPUT FORMAT:**
+
+You MUST generate THREE separate DRL files. Format your response like this:
+
+```level1-drl
+package com.underwriting.rules;
+
+// LEVEL 1: Critical/Knockout Rules
+declare Applicant
+    ...
+end
+
+declare Policy
+    ...
+end
+
+declare Decision
+    approved: boolean
+    reasons: java.util.List
+    ...
+end
+
+rule "Initialize Decision"
+    ...
+end
+
+rule "L1: [Rule Name]"
+    ...
+end
+```
+
+```level2-drl
+package com.underwriting.rules;
+
+// LEVEL 2: Standard/Important Rules
+declare Applicant
+    ...
+end
+
+// ... same declares ...
+
+rule "Initialize Decision"
+    ...
+end
+
+rule "L2: [Rule Name]"
+    ...
+end
+```
+
+```level3-drl
+package com.underwriting.rules;
+
+// LEVEL 3: Preferred/Optimal Rules
+declare Applicant
+    ...
+end
+
+// ... same declares ...
+
+rule "Initialize Decision"
+    ...
+end
+
+rule "L3: [Rule Name]"
+    ...
+end
+```
+
+After the three code blocks, provide a brief explanation of how you categorized the rules.
+
+DO NOT generate decision tables - only generate DRL rules."""),
+            ("user", """Extracted policy data:
+
+{extracted_data}
+
+Generate THREE complete, self-contained Drools DRL files (level1, level2, level3) with 'declare' statements in each.""")
+        ])
+
+        # Original prompt for non-hierarchical generation (backwards compatibility)
+        self.rule_generation_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are an expert in insurance underwriting rules and Drools rule engine.
+
+Given extracted policy data, generate executable Drools DRL (Drools Rule Language) rules.
+
+IMPORTANT: Use 'declare' statements to define types directly in the DRL file. Do NOT import external Java classes.
+
+The rules should follow this structure:
+
+```drl
+package com.underwriting.rules;
+
+// Declare types directly in DRL (no external Java classes needed)
+declare Applicant
+    name: String
+    age: int
+    occupation: String
+    healthConditions: String
+end
+
+declare Policy
+    policyType: String
+    coverageAmount: double
+    term: int
+end
+
+declare Decision
+    approved: boolean
+    reasons: java.util.List
+    requiresManualReview: boolean
+    premiumMultiplier: double
+end
+
+// Rules using the declared types
+rule "Initialize Decision"
+    when
+        not Decision()
+    then
+        Decision decision = new Decision();
+        decision.setApproved(true);
+        decision.setReasons(new java.util.ArrayList());
+        decision.setRequiresManualReview(false);
+        decision.setPremiumMultiplier(1.0);
+        insert(decision);
+end
+
+rule "Age Requirement Check"
+    when
+        $applicant : Applicant( age < 18 || age > 65 )
+        $decision : Decision()
+    then
+        $decision.setApproved(false);
+        $decision.getReasons().add("Applicant age is outside acceptable range");
+        update($decision);
+end
+```
+
 Guidelines:
 1. ALWAYS use 'declare' statements to define Applicant, Policy, and Decision types at the top of the DRL file
 2. Do NOT use import statements for model classes
-3. Create clear, specific rule names based on the extracted data
-4. Include an "Initialize Decision" rule that creates the Decision object if it doesn't exist
-5. Use appropriate conditions based on the extracted data
-6. Make rules executable and testable
-7. Add comments explaining complex logic
-8. Handle edge cases and validation
-9. Use proper getter/setter methods (e.g., setApproved(), getReasons().add("reason"))
-10. For rejection rules, use $decision.getReasons().add("reason text") to accumulate ALL rejection reasons
-11. NEVER use setReason() or setReasons() in rejection rules - always use getReasons().add() to preserve all reasons
-12. When comparing fields from different objects (e.g., Applicant.annualIncome vs Policy.coverageAmount), use variable binding: bind the field to a variable in one object pattern, then reference that variable in another object's constraint
-13. CORRECT multi-object syntax: `$applicant : Applicant( $income : annualIncome )  $policy : Policy( coverageAmount > ($income * 10) )`
-14. WRONG multi-object syntax: `$applicant : Applicant( annualIncome * 10 < coverageAmount )` - this will fail because coverageAmount is not on Applicant
+3. **CRITICAL**: Every field you reference in rules MUST be declared in the type definition. If you use `loanType` in a rule, you MUST add `loanType: String` in the declare statement.
+4. **CRITICAL**: Before writing rules, first decide ALL fields needed and add them to the declare statements. Then write rules using only those declared fields.
+5. Create clear, specific rule names based on the extracted data
+6. Include an "Initialize Decision" rule that creates the Decision object if it doesn't exist
+7. Use appropriate conditions based on the extracted data
+8. Make rules executable and testable
+9. Add comments explaining complex logic
+10. Handle edge cases and validation
+11. Use proper getter/setter methods (e.g., setApproved(), getReasons().add("reason"))
+12. For rejection rules, use $decision.getReasons().add("reason text") to accumulate ALL rejection reasons
+13. NEVER use setReason() or setReasons() in rejection rules - always use getReasons().add() to preserve all reasons
+14. When comparing fields from different objects (e.g., Applicant.annualIncome vs Policy.coverageAmount), use variable binding: bind the field to a variable in one object pattern, then reference that variable in another object's constraint
+15. CORRECT multi-object syntax: `$applicant : Applicant( $income : annualIncome )  $policy : Policy( coverageAmount > ($income * 10) )`
+16. WRONG multi-object syntax: `$applicant : Applicant( annualIncome * 10 < coverageAmount )` - this will fail because coverageAmount is not on Applicant
 
 Return your response with:
 1. Complete DRL rules in ```drl code blocks (including declare statements)
@@ -136,6 +309,7 @@ Generate complete, self-contained Drools DRL rules with 'declare' statements for
         ])
 
         self.chain = self.rule_generation_prompt | self.llm
+        self.hierarchical_chain = self.hierarchical_rule_generation_prompt | self.llm
 
     def generate_rules(self, extracted_data: Dict) -> Dict[str, str]:
         """
@@ -234,6 +408,70 @@ Generate complete, self-contained Drools DRL rules with 'declare' statements for
             except Exception as e2:
                 print(f"Error saving as CSV: {e2}")
                 return None
+
+    def generate_hierarchical_rules(self, extracted_data: Dict) -> Dict[str, any]:
+        """
+        Generate hierarchical Drools rules from extracted data (3 levels)
+
+        :param extracted_data: Data extracted by Textract
+        :return: Dictionary with 'level1_drl', 'level2_drl', 'level3_drl', and 'explanation' keys
+        """
+        try:
+            result = self.hierarchical_chain.invoke({
+                "extracted_data": json.dumps(extracted_data, indent=2)
+            })
+
+            # Parse LLM response to extract the three DRL files
+            content = result.content
+
+            # Extract Level 1 DRL
+            level1_drl = self._extract_code_block(content, 'level1-drl') or \
+                        self._extract_code_block(content, 'drl')  # Fallback
+
+            # Extract Level 2 DRL
+            level2_drl = self._extract_code_block(content, 'level2-drl')
+
+            # Extract Level 3 DRL
+            level3_drl = self._extract_code_block(content, 'level3-drl')
+
+            # Extract explanation
+            explanation = self._extract_explanation(content)
+
+            # Fallback: If LLM didn't follow the format, use single-level generation
+            if not level1_drl or not level2_drl or not level3_drl:
+                print("⚠ LLM did not generate all 3 levels, falling back to single-level generation")
+                single_result = self.generate_rules(extracted_data)
+
+                # Split single DRL into 3 equal parts as fallback (not ideal but functional)
+                drl_content = single_result.get('drl', '')
+                return {
+                    'level1_drl': drl_content,
+                    'level2_drl': "// No Level 2 rules generated",
+                    'level3_drl': "// No Level 3 rules generated",
+                    'explanation': "Fallback: Generated single-level rules only",
+                    'raw_response': content,
+                    'hierarchical': False
+                }
+
+            return {
+                'level1_drl': level1_drl,
+                'level2_drl': level2_drl,
+                'level3_drl': level3_drl,
+                'explanation': explanation,
+                'raw_response': content,
+                'hierarchical': True
+            }
+
+        except Exception as e:
+            print(f"Error generating hierarchical rules: {e}")
+            return {
+                'level1_drl': "// Error generating level 1 rules",
+                'level2_drl': "// Error generating level 2 rules",
+                'level3_drl': "// Error generating level 3 rules",
+                'explanation': f"Error: {str(e)}",
+                'raw_response': "",
+                'hierarchical': False
+            }
 
     def generate_template_drl(self, rule_category: str) -> str:
         """

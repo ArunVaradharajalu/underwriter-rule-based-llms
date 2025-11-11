@@ -203,6 +203,52 @@ def process_policy_from_s3():
     except Exception as e:
         return jsonify({'error': str(e), 'status': 'failed'}), 500
 
+@app.route(ROUTE + '/process_policy_from_s3_hierarchical', methods=['POST', 'OPTIONS'])
+def process_policy_from_s3_hierarchical():
+    """
+    Process a policy PDF from S3 URL through the HIERARCHICAL underwriting workflow
+
+    Generates rules at 3 priority levels:
+    - Level 1: Critical/Knockout rules
+    - Level 2: Standard/Important rules
+    - Level 3: Preferred/Optimal rules
+
+    Deploys all 3 levels to a single Docker container with 3 separate KIE containers inside.
+    """
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'JSON body is required'}), 400
+
+    # Validate required fields
+    if 's3_url' not in data:
+        return jsonify({'error': 's3_url is required in JSON body'}), 400
+
+    if 'policy_type' not in data:
+        return jsonify({'error': 'policy_type is required in JSON body (e.g., "life_insurance", "auto", "property")'}), 400
+
+    if 'bank_id' not in data:
+        return jsonify({'error': 'bank_id is required in JSON body (e.g., "chase", "bofa", "wells-fargo")'}), 400
+
+    s3_url = data['s3_url']
+    policy_type = data['policy_type']
+    bank_id = data['bank_id']
+
+    # Process through hierarchical workflow with S3 URL
+    try:
+        result = underwritingWorkflow.process_policy_document_hierarchical(
+            s3_url=s3_url,
+            policy_type=policy_type,
+            bank_id=bank_id
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e), 'status': 'failed'}), 500
+
 @app.route(ROUTE + '/list_generated_rules', methods=['GET'])
 def list_generated_rules():
     """List all generated rule files - DEPRECATED
@@ -762,6 +808,124 @@ def evaluate_policy():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route(ROUTE + '/api/v1/evaluate-policy-hierarchical', methods=['POST', 'OPTIONS'])
+def evaluate_policy_hierarchical():
+    """
+    Evaluate a policy application using deployed HIERARCHICAL rule engine with short-circuit behavior
+
+    This endpoint evaluates rules level by level:
+    - Level 1 (Critical): If any rule fails, stop immediately and return rejection
+    - Level 2 (Standard): Only execute if Level 1 passed
+    - Level 3 (Preferred): Only execute if Level 1 and 2 passed
+
+    This is more efficient than evaluating all rules at once, and provides clearer rejection reasons.
+    """
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    try:
+        data = request.get_json()
+
+        if not data:
+            return jsonify({'error': 'JSON body is required'}), 400
+
+        # Validate required fields
+        if 'bank_id' not in data:
+            return jsonify({'error': 'bank_id is required'}), 400
+
+        if 'policy_type' not in data:
+            return jsonify({'error': 'policy_type is required'}), 400
+
+        if 'applicant' not in data:
+            return jsonify({'error': 'applicant data is required'}), 400
+
+        bank_id = data['bank_id']
+        policy_type = data['policy_type']
+        applicant = data['applicant']
+        policy_data = data.get('policy', {})
+
+        # Get the base container ID (hierarchical containers follow pattern: {container_id}-level1, level2, level3)
+        # First, try to find the base container
+        normalized_type = policy_type.lower().strip().replace(' ', '-')
+        normalized_bank = bank_id.lower().strip().replace(' ', '-')
+        container_id = f"{normalized_bank}-{normalized_type}-underwriting-rules"
+
+        print(f"DEBUG: Looking for hierarchical container: {container_id}")
+
+        # Check if level1 container exists
+        level1_container = db_service.get_active_container(bank_id, policy_type)
+
+        if not level1_container:
+            return jsonify({
+                "status": "error",
+                "message": f"No hierarchical rules deployed for bank '{bank_id}' and policy type '{policy_type}'. Please deploy hierarchical rules first using /process_policy_from_s3_hierarchical"
+            }), 404
+
+        # Build the payload for Drools
+        request_payload = {
+            "applicant": applicant,
+            "policy": policy_data
+        }
+
+        import time
+        start_time = time.time()
+
+        # Invoke the hierarchical rule engine (with short-circuit evaluation)
+        try:
+            decision = droolsService.evaluate_with_levels(container_id, request_payload)
+            execution_time = int((time.time() - start_time) * 1000)  # ms
+
+            # Log the request to database for analytics
+            db_service.log_request({
+                'container_id': level1_container['id'],
+                'bank_id': bank_id,
+                'policy_type_id': policy_type,
+                'endpoint': f"/hierarchical/{container_id}",
+                'http_method': 'POST',
+                'request_payload': request_payload,
+                'response_payload': decision,
+                'execution_time_ms': execution_time,
+                'status': 'success',
+                'status_code': 200
+            })
+
+            return jsonify({
+                "status": "success",
+                "bank_id": bank_id,
+                "policy_type": policy_type,
+                "container_id": container_id,
+                "decision": decision,
+                "execution_time_ms": execution_time,
+                "evaluation_mode": "hierarchical"
+            })
+
+        except Exception as rule_error:
+            execution_time = int((time.time() - start_time) * 1000)
+
+            # Log the error
+            db_service.log_request({
+                'container_id': level1_container['id'],
+                'bank_id': bank_id,
+                'policy_type_id': policy_type,
+                'endpoint': f"/hierarchical/{container_id}",
+                'http_method': 'POST',
+                'request_payload': request_payload,
+                'execution_time_ms': execution_time,
+                'status': 'error',
+                'status_code': 500,
+                'error_message': str(rule_error)
+            })
+
+            return jsonify({
+                "status": "error",
+                "message": f"Error executing hierarchical rules: {str(rule_error)}"
+            }), 500
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route(ROUTE + '/api/v1/deployments', methods=['GET'])
 def list_deployments():
     """List all rule deployments (admin endpoint)"""
@@ -873,12 +1037,43 @@ def get_extracted_rules():
         # Fetch extracted rules from database
         rules = db_service.get_extracted_rules(bank_id, policy_type, active_only=True)
 
+        # Add level descriptions for rules with level information
+        # Level is now a dedicated database column (no parsing needed!)
+        level_descriptions = {
+            1: "Critical/Knockout Rules",
+            2: "Standard/Important Rules",
+            3: "Preferred/Optimal Rules"
+        }
+
+        for rule in rules:
+            level = rule.get('level')
+            if level is not None:
+                rule['level_description'] = level_descriptions.get(level, "Unknown")
+            else:
+                rule['level_description'] = "Single-level rule (non-hierarchical)"
+
+        # Group rules by level for better organization
+        rules_by_level = {
+            "level1": [r for r in rules if r.get('level') == 1],
+            "level2": [r for r in rules if r.get('level') == 2],
+            "level3": [r for r in rules if r.get('level') == 3],
+            "single_level": [r for r in rules if r.get('level') is None]
+        }
+
         return jsonify({
             "status": "success",
             "bank_id": bank_id,
             "policy_type": policy_type,
             "rule_count": len(rules),
-            "rules": rules
+            "hierarchical": any(r.get('level') is not None for r in rules),
+            "rules": rules,
+            "rules_by_level": rules_by_level,
+            "level_counts": {
+                "level1": len(rules_by_level["level1"]),
+                "level2": len(rules_by_level["level2"]),
+                "level3": len(rules_by_level["level3"]),
+                "single_level": len(rules_by_level["single_level"])
+            }
         })
     except Exception as e:
         logger.error(f"Error fetching extracted rules: {e}")
