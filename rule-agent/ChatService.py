@@ -36,7 +36,18 @@ ROUTE="/rule-agent"
 db_service = get_database_service()
 
 app = Flask(__name__)
-cors = CORS(app)
+
+# Configure CORS to allow all origins with all necessary headers and methods
+cors = CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+        "expose_headers": ["Content-Type", "X-Total-Count"],
+        "supports_credentials": False,
+        "max_age": 3600
+    }
+})
 app.config['CORS_HEADERS'] = 'Content-Type'
 
 # create a LLM service
