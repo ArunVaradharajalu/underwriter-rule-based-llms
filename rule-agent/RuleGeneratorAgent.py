@@ -83,6 +83,28 @@ rule "Age Requirement Check"
         $decision.getReasons().add("Applicant age is outside acceptable range");
         update($decision);
 end
+
+rule "Coverage vs Income Limit Check"
+    when
+        $applicant : Applicant( $income : annualIncome )
+        $policy : Policy( coverageAmount > ($income * 10) )
+        $decision : Decision()
+    then
+        $decision.setApproved(false);
+        $decision.getReasons().add("Coverage amount exceeds 10x annual income");
+        update($decision);
+end
+
+rule "Age and Coverage Combined Check"
+    when
+        $applicant : Applicant( age > 50, $income : annualIncome )
+        $policy : Policy( coverageAmount > 500000, coverageAmount > ($income * 5) )
+        $decision : Decision()
+    then
+        $decision.setApproved(false);
+        $decision.getReasons().add("High coverage requires manual review for age 50+");
+        update($decision);
+end
 ```
 
 Guidelines:
@@ -97,6 +119,9 @@ Guidelines:
 9. Use proper getter/setter methods (e.g., setApproved(), getReasons().add("reason"))
 10. For rejection rules, use $decision.getReasons().add("reason text") to accumulate ALL rejection reasons
 11. NEVER use setReason() or setReasons() in rejection rules - always use getReasons().add() to preserve all reasons
+12. When comparing fields from different objects (e.g., Applicant.annualIncome vs Policy.coverageAmount), use variable binding: bind the field to a variable in one object pattern, then reference that variable in another object's constraint
+13. CORRECT multi-object syntax: `$applicant : Applicant( $income : annualIncome )  $policy : Policy( coverageAmount > ($income * 10) )`
+14. WRONG multi-object syntax: `$applicant : Applicant( annualIncome * 10 < coverageAmount )` - this will fail because coverageAmount is not on Applicant
 
 Return your response with:
 1. Complete DRL rules in ```drl code blocks (including declare statements)

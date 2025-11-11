@@ -252,6 +252,90 @@ paths:
                     coverageAmount: 500000
                     termYears: 20
                     type: term_life
+              loan-application:
+                summary: Loan Application (Approved)
+                value:
+                  bank_id: chase
+                  policy_type: loan
+                  applicant:
+                    age: 35
+                    annualIncome: 85000
+                    creditScore: 720
+                  policy:
+                    loanAmount: 150000
+                    personalGuarantee: false
+              loan-application-high-amount:
+                summary: Loan Application (High Amount with Personal Guarantee)
+                value:
+                  bank_id: chase
+                  policy_type: loan
+                  applicant:
+                    age: 45
+                    annualIncome: 250000
+                    creditScore: 780
+                  policy:
+                    loanAmount: 2000000
+                    personalGuarantee: true
+              loan-application-rejected-age:
+                summary: Loan Application (Rejected - Under 18)
+                value:
+                  bank_id: chase
+                  policy_type: loan
+                  applicant:
+                    age: 17
+                    annualIncome: 30000
+                    creditScore: 680
+                  policy:
+                    loanAmount: 50000
+                    personalGuarantee: false
+              loan-application-rejected-income:
+                summary: Loan Application (Rejected - Low Income)
+                value:
+                  bank_id: chase
+                  policy_type: loan
+                  applicant:
+                    age: 28
+                    annualIncome: 20000
+                    creditScore: 680
+                  policy:
+                    loanAmount: 50000
+                    personalGuarantee: false
+              loan-application-rejected-credit:
+                summary: Loan Application (Rejected - Credit Score)
+                value:
+                  bank_id: chase
+                  policy_type: loan
+                  applicant:
+                    age: 35
+                    annualIncome: 60000
+                    creditScore: 590
+                  policy:
+                    loanAmount: 100000
+                    personalGuarantee: false
+              loan-application-rejected-no-guarantee:
+                summary: Loan Application (Rejected - Missing Personal Guarantee)
+                value:
+                  bank_id: chase
+                  policy_type: loan
+                  applicant:
+                    age: 40
+                    annualIncome: 120000
+                    creditScore: 750
+                  policy:
+                    loanAmount: 500000
+                    personalGuarantee: false
+              loan-application-rejected-amount-limit:
+                summary: Loan Application (Rejected - Exceeds Maximum)
+                value:
+                  bank_id: chase
+                  policy_type: loan
+                  applicant:
+                    age: 50
+                    annualIncome: 500000
+                    creditScore: 800
+                  policy:
+                    loanAmount: 6000000
+                    personalGuarantee: true
       responses:
         '200':
           description: Decision returned successfully

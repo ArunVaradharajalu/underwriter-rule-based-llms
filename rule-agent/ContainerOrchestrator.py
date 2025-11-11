@@ -837,6 +837,12 @@ class ContainerOrchestrator:
                 # Put it in the dedicated container
                 container.put_archive('/tmp', tar_data)
 
+                # Create parent directory in dedicated container if it doesn't exist
+                mkdir_result = container.exec_run(
+                    f"sh -c 'mkdir -p {parent_path}'",
+                    user='root'
+                )
+
                 # Extract it in the dedicated container
                 extract_result = container.exec_run(
                     f"sh -c 'cd {parent_path} && tar -xzf /tmp/kjar_copy.tar.gz && rm /tmp/kjar_copy.tar.gz'",

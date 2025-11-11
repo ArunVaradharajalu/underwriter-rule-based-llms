@@ -222,7 +222,7 @@ class DroolsDeploymentService:
         kmodule_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kmodule xmlns="http://www.drools.org/xsd/kmodule">
     <kbase name="rules" packages="rules">
-        <ksession name="ksession-rules" default="true"/>
+        <ksession name="ksession-rules" type="stateless" default="true"/>
     </kbase>
 </kmodule>
 """
