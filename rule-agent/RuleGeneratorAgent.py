@@ -56,7 +56,7 @@ end
 
 declare Decision
     approved: boolean
-    reason: String
+    reasons: java.util.List
     requiresManualReview: boolean
     premiumMultiplier: double
 end
@@ -68,7 +68,7 @@ rule "Initialize Decision"
     then
         Decision decision = new Decision();
         decision.setApproved(true);
-        decision.setReason("Initial evaluation");
+        decision.setReasons(new java.util.ArrayList());
         decision.setRequiresManualReview(false);
         decision.setPremiumMultiplier(1.0);
         insert(decision);
@@ -80,7 +80,7 @@ rule "Age Requirement Check"
         $decision : Decision()
     then
         $decision.setApproved(false);
-        $decision.setReason("Applicant age is outside acceptable range");
+        $decision.getReasons().add("Applicant age is outside acceptable range");
         update($decision);
 end
 ```
@@ -94,7 +94,9 @@ Guidelines:
 6. Make rules executable and testable
 7. Add comments explaining complex logic
 8. Handle edge cases and validation
-9. Use proper getter/setter methods (e.g., setApproved(), setReason())
+9. Use proper getter/setter methods (e.g., setApproved(), getReasons().add("reason"))
+10. For rejection rules, use $decision.getReasons().add("reason text") to accumulate ALL rejection reasons
+11. NEVER use setReason() or setReasons() in rejection rules - always use getReasons().add() to preserve all reasons
 
 Return your response with:
 1. Complete DRL rules in ```drl code blocks (including declare statements)

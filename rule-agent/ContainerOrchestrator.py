@@ -753,6 +753,189 @@ class ContainerOrchestrator:
             print(f"  Health check: Error checking Docker container health: {e}")
             return False
 
+    def deploy_kjar_to_container(self, container_id: str, jar_path: str,
+                                  group_id: str, artifact_id: str, version: str) -> Dict:
+        """
+        Deploy a KJar to a dedicated Drools container
+
+        This method:
+        1. Copies the JAR and POM from the source to the dedicated container's Maven repository
+        2. Deploys the KIE container within the dedicated Drools server
+
+        Args:
+            container_id: The KIE container ID (e.g., 'chase-insurance-underwriting-rules')
+            jar_path: Path to the JAR file on the host or in the main drools container
+            group_id: Maven group ID (e.g., 'com.underwriting')
+            artifact_id: Maven artifact ID (e.g., 'underwriting-rules')
+            version: Maven version (e.g., '20251111.005208')
+
+        Returns:
+            Dictionary with status and message
+        """
+        if self.platform == 'docker':
+            return self._deploy_kjar_to_docker_container(container_id, jar_path, group_id, artifact_id, version)
+        elif self.platform == 'kubernetes':
+            return self._deploy_kjar_to_k8s_pod(container_id, jar_path, group_id, artifact_id, version)
+        else:
+            return {"status": "error", "message": f"Unknown platform: {self.platform}"}
+
+    def _deploy_kjar_to_docker_container(self, container_id: str, jar_path: str,
+                                          group_id: str, artifact_id: str, version: str) -> Dict:
+        """Deploy KJar to a Docker container"""
+        import docker
+        import tarfile
+        import io
+
+        try:
+            client = docker.from_env()
+
+            # Get container info from database
+            db_container = self.db_service.get_container_by_id(container_id)
+            if not db_container:
+                return {"status": "error", "message": f"Container {container_id} not found in registry"}
+
+            container_name = db_container['container_name']
+
+            # Check if container is running
+            try:
+                container = client.containers.get(container_name)
+                if container.status != 'running':
+                    return {"status": "error", "message": f"Container {container_name} is not running (status: {container.status})"}
+            except docker.errors.NotFound:
+                return {"status": "error", "message": f"Docker container {container_name} not found"}
+
+            print(f"Deploying KJar to dedicated container {container_name}...")
+
+            # Maven repository path structure: group_id/artifact_id/version/
+            maven_path = f"{group_id.replace('.', '/')}/{artifact_id}/{version}"
+
+            # Step 1: Copy JAR from main drools container to dedicated container
+            # Get the parent directory containing the version folder
+            parent_path = f"/opt/jboss/.m2/repository/{group_id.replace('.', '/')}/{artifact_id}"
+            source_version_path = f"{parent_path}/{version}"
+
+            try:
+                # Use docker exec to create a tar archive and copy it
+                main_drools = client.containers.get('drools')
+
+                # Create tar in main drools container
+                tar_result = main_drools.exec_run(
+                    f"sh -c 'cd {parent_path} && tar -czf /tmp/kjar_copy.tar.gz {version}'",
+                    user='root'
+                )
+
+                if tar_result.exit_code != 0:
+                    return {
+                        "status": "error",
+                        "message": f"Failed to create tar in main drools container: {tar_result.output.decode()}"
+                    }
+
+                # Get the tar file
+                bits, stat = main_drools.get_archive('/tmp/kjar_copy.tar.gz')
+                tar_data = b''.join(bits)
+
+                # Put it in the dedicated container
+                container.put_archive('/tmp', tar_data)
+
+                # Extract it in the dedicated container
+                extract_result = container.exec_run(
+                    f"sh -c 'cd {parent_path} && tar -xzf /tmp/kjar_copy.tar.gz && rm /tmp/kjar_copy.tar.gz'",
+                    user='root'
+                )
+
+                if extract_result.exit_code != 0:
+                    return {
+                        "status": "error",
+                        "message": f"Failed to extract tar in dedicated container: {extract_result.output.decode()}"
+                    }
+
+                # Clean up in main drools
+                main_drools.exec_run("rm /tmp/kjar_copy.tar.gz", user='root')
+
+                print(f"  ✓ Copied KJar files to {container_name}:{source_version_path}")
+
+            except docker.errors.NotFound as e:
+                return {
+                    "status": "error",
+                    "message": f"KJar not found in main drools container: {str(e)}"
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "message": f"Error copying KJar: {str(e)}"
+                }
+
+            # Step 2: Deploy the KIE container within the dedicated Drools server
+            endpoint = db_container['endpoint']
+            deploy_url = f"{endpoint}/kie-server/services/rest/server/containers/{container_id}"
+
+            payload = {
+                "container-id": container_id,
+                "release-id": {
+                    "group-id": group_id,
+                    "artifact-id": artifact_id,
+                    "version": version
+                }
+            }
+
+            print(f"  Deploying KIE container {container_id} in {container_name}...")
+
+            # Check if container already exists in KIE server
+            check_response = requests.get(
+                deploy_url,
+                auth=requests.auth.HTTPBasicAuth('admin', 'admin'),
+                headers={'Accept': 'application/json'}
+            )
+
+            if check_response.status_code == 200:
+                print(f"  Container {container_id} already exists in KIE server, disposing first...")
+                requests.delete(
+                    deploy_url,
+                    auth=requests.auth.HTTPBasicAuth('admin', 'admin'),
+                    headers={'Accept': 'application/json'}
+                )
+
+            # Deploy the container
+            response = requests.put(
+                deploy_url,
+                auth=requests.auth.HTTPBasicAuth('admin', 'admin'),
+                headers={
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                json=payload
+            )
+
+            if response.status_code in [200, 201]:
+                print(f"  ✓ KIE container {container_id} deployed successfully in {container_name}")
+                return {
+                    "status": "success",
+                    "message": f"KJar deployed to {container_name} and KIE container started",
+                    "container_name": container_name,
+                    "endpoint": endpoint
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to deploy KIE container: {response.status_code} - {response.text}"
+                }
+
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Error deploying KJar to container: {str(e)}"
+            }
+
+    def _deploy_kjar_to_k8s_pod(self, container_id: str, jar_path: str,
+                                 group_id: str, artifact_id: str, version: str) -> Dict:
+        """Deploy KJar to a Kubernetes pod"""
+        # For Kubernetes, we would use ConfigMaps or PersistentVolumes
+        # This is a placeholder for future implementation
+        return {
+            "status": "error",
+            "message": "Kubernetes KJar deployment not yet implemented"
+        }
+
     def _check_k8s_pod_health(self, container_id: str) -> bool:
         """
         Check if a Kubernetes pod is healthy (running and ready)

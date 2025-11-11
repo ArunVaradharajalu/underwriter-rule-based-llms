@@ -654,18 +654,43 @@ Manual Deployment Steps:
                         print(f"⚠ Failed to create container: {orchestration_result.get('message')}")
 
             # Step 5: Deploy to KIE Server
-            deploy_result = self.deploy_container(container_id, group_id, artifact_id, version)
-            result["steps"]["deploy"] = deploy_result
+            # If orchestrator is enabled, deploy to BOTH main server and dedicated container
+            if self.use_orchestrator and self.orchestrator:
+                # Deploy to main Drools server first (for backup/legacy compatibility)
+                print(f"Deploying to main Drools server...")
+                deploy_result = self.deploy_container(container_id, group_id, artifact_id, version)
+                result["steps"]["deploy_main"] = deploy_result
 
-            if deploy_result["status"] == "success":
-                result["status"] = "success"
-                message = f"Rules automatically deployed to container {container_id}"
-                if self.use_orchestrator:
-                    message += " (dedicated Drools container)"
-                result["message"] = message
+                if deploy_result["status"] == "success":
+                    print(f"✓ Deployed to main Drools server")
+
+                # Now deploy to the dedicated container
+                print(f"Deploying KJar to dedicated container {container_id}...")
+                dedicated_deploy_result = self.orchestrator.deploy_kjar_to_container(
+                    container_id, jar_path, group_id, artifact_id, version
+                )
+                result["steps"]["deploy_dedicated"] = dedicated_deploy_result
+
+                if dedicated_deploy_result["status"] == "success":
+                    print(f"✓ KJar deployed to dedicated container")
+                    result["status"] = "success"
+                    result["message"] = f"Rules deployed to dedicated container {dedicated_deploy_result.get('container_name')}"
+                else:
+                    print(f"⚠ Failed to deploy to dedicated container: {dedicated_deploy_result.get('message')}")
+                    result["status"] = "partial"
+                    result["message"] = "Deployed to main server but failed to deploy to dedicated container"
+
             else:
-                result["status"] = "partial"
-                result["message"] = "KJar built but deployment to KIE Server failed"
+                # No orchestrator - deploy to main Drools server only
+                deploy_result = self.deploy_container(container_id, group_id, artifact_id, version)
+                result["steps"]["deploy"] = deploy_result
+
+                if deploy_result["status"] == "success":
+                    result["status"] = "success"
+                    result["message"] = f"Rules automatically deployed to container {container_id}"
+                else:
+                    result["status"] = "partial"
+                    result["message"] = "KJar built but deployment to KIE Server failed"
 
             print(f"✓ Build directory will be auto-deleted: {temp_dir}")
 
