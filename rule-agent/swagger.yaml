@@ -11,14 +11,22 @@ info:
     - Evaluate applications without knowing container details
     - Multi-tenant isolation with separate containers per bank+policy
     - Request tracking and analytics
+    - **NEW v2.1:** Extraction query transparency with confidence scores
 
     **Architecture:**
     - Customer apps query by `bank_id` + `policy_type`
     - System automatically routes to correct rule engine container
     - All requests logged to database for analytics
     - Health checking ensures high availability
+    - LLM-generated queries and Textract responses stored for audit trail
 
-  version: 2.0.0
+    **What's New in v2.1:**
+    - Extraction queries with AWS Textract confidence scores stored in database
+    - Optional inclusion of queries and rules in API responses
+    - Complete transparency into rule extraction process
+    - Query performance and quality monitoring via confidence scores
+
+  version: 2.1.0
   contact:
     name: IBM Automation
     url: https://github.com/DecisionsDev
@@ -76,7 +84,13 @@ paths:
       tags:
         - Customer API
       summary: List available policies for a bank
-      description: Get all policy types available for a specific bank
+      description: |
+        Get all policy types available for a specific bank.
+
+        **New in v2.1:**
+        - Optional inclusion of extraction query counts
+        - Optional inclusion of extracted rule counts
+        - Optional full details with all queries and rules
       operationId: listBankPolicies
       parameters:
         - name: bank_id
@@ -85,6 +99,30 @@ paths:
           schema:
             type: string
           example: chase
+        - name: include_queries
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include extraction query counts for each policy
+          example: true
+        - name: include_rules
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include extracted rule counts for each policy
+          example: true
+        - name: details
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include full details with all queries and rules (overrides include_queries and include_rules)
+          example: false
       responses:
         '200':
           description: List of available policies
@@ -99,6 +137,9 @@ paths:
                   bank_id:
                     type: string
                     example: chase
+                  total_policies:
+                    type: integer
+                    example: 2
                   policies:
                     type: array
                     items:
@@ -115,13 +156,37 @@ paths:
                         category:
                           type: string
                           example: insurance
+                        extraction_queries_count:
+                          type: integer
+                          description: Number of extraction queries (only if include_queries or details is true)
+                          example: 20
+                        extracted_rules_count:
+                          type: integer
+                          description: Number of extracted rules (only if include_rules or details is true)
+                          example: 15
+                        extraction_queries:
+                          type: array
+                          description: Full extraction queries (only if details is true)
+                          items:
+                            $ref: '#/components/schemas/ExtractionQuery'
+                        extracted_rules:
+                          type: array
+                          description: Full extracted rules (only if details is true)
+                          items:
+                            $ref: '#/components/schemas/ExtractedRule'
 
   /api/v1/policies:
     get:
       tags:
         - Customer API
-      summary: Query specific policy container
-      description: Check if rules are deployed for a specific bank+policy combination
+      summary: Query specific policy container with extraction details
+      description: |
+        Check if rules are deployed for a specific bank+policy combination.
+
+        **New in v2.1:**
+        - Optional inclusion of extraction queries with confidence scores
+        - Optional inclusion of extracted rules
+        - Provides transparency into the rule extraction process
       operationId: queryPolicies
       parameters:
         - name: bank_id
@@ -130,15 +195,33 @@ paths:
           schema:
             type: string
           example: chase
+          description: Bank identifier
         - name: policy_type
           in: query
           required: true
           schema:
             type: string
           example: insurance
+          description: Policy type identifier
+        - name: include_queries
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include LLM-generated extraction queries with Textract responses and confidence scores
+          example: true
+        - name: include_rules
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include extracted underwriting rules
+          example: true
       responses:
         '200':
-          description: Container information
+          description: Container information with optional extraction details
           content:
             application/json:
               schema:
@@ -149,6 +232,85 @@ paths:
                     example: success
                   container:
                     $ref: '#/components/schemas/ContainerInfo'
+                  extraction_queries:
+                    type: array
+                    description: Extraction queries with responses (only if include_queries is true)
+                    items:
+                      $ref: '#/components/schemas/ExtractionQuery'
+                  extraction_queries_count:
+                    type: integer
+                    description: Number of extraction queries (only if include_queries is true)
+                    example: 20
+                  extracted_rules:
+                    type: array
+                    description: Extracted rules (only if include_rules is true)
+                    items:
+                      $ref: '#/components/schemas/ExtractedRule'
+                  extracted_rules_count:
+                    type: integer
+                    description: Number of extracted rules (only if include_rules is true)
+                    example: 15
+              examples:
+                basic-response:
+                  summary: Basic response (no optional data)
+                  value:
+                    status: success
+                    container:
+                      container_id: chase-insurance-underwriting-rules
+                      bank_id: chase
+                      policy_type_id: insurance
+                      endpoint: http://drools-chase-insurance:8080
+                      status: running
+                      health_status: healthy
+                      deployed_at: "2025-11-12T10:00:00"
+                with-queries-and-rules:
+                  summary: Response with extraction queries and rules
+                  value:
+                    status: success
+                    container:
+                      container_id: chase-insurance-underwriting-rules
+                      bank_id: chase
+                      policy_type_id: insurance
+                      endpoint: http://drools-chase-insurance:8080
+                      status: running
+                      health_status: healthy
+                      deployed_at: "2025-11-12T10:00:00"
+                    extraction_queries_count: 20
+                    extraction_queries:
+                      - id: 1
+                        query_text: "What is the maximum coverage amount?"
+                        response_text: "$1,000,000"
+                        confidence_score: 95.5
+                        document_hash: "abc123..."
+                        source_document: "s3://bucket/policy.pdf"
+                        extraction_method: "textract"
+                        query_order: 1
+                        is_active: true
+                        created_at: "2025-11-12T09:00:00"
+                        updated_at: "2025-11-12T09:00:00"
+                      - id: 2
+                        query_text: "What is the minimum age requirement?"
+                        response_text: "18 years"
+                        confidence_score: 98.2
+                        document_hash: "abc123..."
+                        source_document: "s3://bucket/policy.pdf"
+                        extraction_method: "textract"
+                        query_order: 2
+                        is_active: true
+                        created_at: "2025-11-12T09:00:00"
+                        updated_at: "2025-11-12T09:00:00"
+                    extracted_rules_count: 15
+                    extracted_rules:
+                      - id: 1
+                        rule_name: "Minimum Age Requirement"
+                        requirement: "Applicant must be at least 18 years old"
+                        category: "Age Requirements"
+                        source_document: "s3://bucket/policy.pdf"
+                        document_hash: "abc123..."
+                        extraction_timestamp: "2025-11-12T09:00:00"
+                        is_active: true
+                        created_at: "2025-11-12T09:00:00"
+                        updated_at: "2025-11-12T09:00:00"
         '404':
           description: No active container found
           content:
@@ -518,6 +680,7 @@ paths:
         1. Extract text from S3 PDF
         2. LLM analyzes and generates extraction queries
         3. AWS Textract extracts structured data
+        3.5. **NEW:** Save extraction queries and Textract responses with confidence scores to database
         4. LLM generates DRL rules
         4.5. Transform rules to user-friendly text using OpenAI
         5. Deploy to Drools KIE Server
@@ -1005,6 +1168,62 @@ components:
           format: date-time
           description: Timestamp when the record was last updated
           example: "2025-11-10T10:30:00"
+
+    ExtractionQuery:
+      type: object
+      description: LLM-generated extraction query with AWS Textract response and confidence score
+      properties:
+        id:
+          type: integer
+          description: Unique query identifier
+          example: 1
+        query_text:
+          type: string
+          description: The query text generated by LLM for data extraction
+          example: "What is the maximum coverage amount?"
+        response_text:
+          type: string
+          description: The extracted response from AWS Textract
+          example: "$1,000,000"
+        confidence_score:
+          type: number
+          format: float
+          description: Textract confidence score (0-100)
+          minimum: 0
+          maximum: 100
+          example: 95.5
+        document_hash:
+          type: string
+          description: Hash of the source document for linking to containers
+          example: "abc123def456..."
+        source_document:
+          type: string
+          description: Source document path or S3 URL
+          example: "s3://bucket/policies/chase-insurance.pdf"
+        extraction_method:
+          type: string
+          description: Method used for extraction
+          enum: [textract, manual]
+          default: textract
+          example: textract
+        query_order:
+          type: integer
+          description: Order in which query was generated
+          example: 1
+        is_active:
+          type: boolean
+          description: Whether this query is currently active
+          example: true
+        created_at:
+          type: string
+          format: date-time
+          description: Timestamp when the record was created
+          example: "2025-11-12T09:00:00"
+        updated_at:
+          type: string
+          format: date-time
+          description: Timestamp when the record was last updated
+          example: "2025-11-12T09:00:00"
 
     Error:
       type: object

@@ -166,6 +166,49 @@ class UnderwritingWorkflow:
             }
             print(f"✓ Extracted data from {len(queries)} queries using AWS Textract")
 
+            # Step 3.5: Save extraction queries and Textract responses to database
+            if bank_id and policy_type:
+                try:
+                    print("\n" + "="*60)
+                    print("Step 3.5: Saving extraction queries and responses to database...")
+                    print("="*60)
+
+                    # Prepare queries data for database
+                    queries_data = []
+                    textract_queries = extracted_data.get('queries', {})
+
+                    for query_text in queries:
+                        query_info = textract_queries.get(query_text, {})
+                        queries_data.append({
+                            'query_text': query_text,
+                            'response_text': query_info.get('answer', ''),
+                            'confidence_score': query_info.get('confidence', None),
+                            'extraction_method': 'textract'
+                        })
+
+                    # Save to database
+                    saved_query_ids = self.db_service.save_extraction_queries(
+                        bank_id=bank_id,
+                        policy_type_id=policy_type,
+                        queries_data=queries_data,
+                        document_hash=document_hash,
+                        source_document=s3_url
+                    )
+
+                    print(f"✓ Saved {len(saved_query_ids)} extraction queries to database")
+                    result["steps"]["save_extraction_queries"] = {
+                        "status": "success",
+                        "count": len(saved_query_ids),
+                        "query_ids": saved_query_ids
+                    }
+
+                except Exception as e:
+                    print(f"⚠ Failed to save extraction queries to database: {e}")
+                    result["steps"]["save_extraction_queries"] = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+
             # Step 4: Generate Drools rules
             print("\n" + "="*60)
             print("Step 4: Generating Drools rules...")

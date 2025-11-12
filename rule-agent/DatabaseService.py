@@ -217,6 +217,43 @@ class ExtractedRule(Base):
     )
 
 
+class PolicyExtractionQuery(Base):
+    __tablename__ = 'policy_extraction_queries'
+
+    id = Column(Integer, primary_key=True)
+    bank_id = Column(String(50), ForeignKey('banks.bank_id', ondelete='CASCADE'), nullable=False)
+    policy_type_id = Column(String(50), ForeignKey('policy_types.policy_type_id', ondelete='CASCADE'), nullable=False)
+
+    # Query and response details
+    query_text = Column(Text, nullable=False)
+    response_text = Column(Text)
+    confidence_score = Column(Integer)  # Textract confidence score (0-100)
+
+    # Metadata
+    document_hash = Column(String(64), nullable=False)
+    source_document = Column(String(500))
+    extraction_method = Column(String(50), default='textract')
+    query_order = Column(Integer)
+
+    # Status
+    is_active = Column(Boolean, default=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    bank = relationship("Bank")
+    policy_type = relationship("PolicyType")
+
+    __table_args__ = (
+        Index('idx_extraction_queries_bank_policy', 'bank_id', 'policy_type_id'),
+        Index('idx_extraction_queries_document_hash', 'document_hash'),
+        Index('idx_extraction_queries_active', 'is_active'),
+        Index('idx_extraction_queries_created_at', 'created_at'),
+    )
+
+
 class DatabaseService:
     """Service class for database operations"""
 
@@ -671,6 +708,136 @@ class DatabaseService:
                 return True
         except Exception as e:
             logger.error(f"Error deleting extracted rules: {e}")
+            return False
+
+    # Policy Extraction Queries methods
+    def save_extraction_queries(self, bank_id: str, policy_type_id: str,
+                                queries_data: List[Dict[str, Any]],
+                                document_hash: str, source_document: str = None) -> List[int]:
+        """
+        Save extraction queries and Textract responses to database
+
+        Args:
+            bank_id: Bank identifier
+            policy_type_id: Policy type identifier
+            queries_data: List of queries with keys: query_text, response_text, confidence_score
+            document_hash: Hash of source document
+            source_document: Source document path or S3 URL
+
+        Returns:
+            List of created query IDs
+        """
+        try:
+            with self.get_session() as session:
+                # Deactivate existing queries for this bank/policy/document combination
+                session.query(PolicyExtractionQuery).filter_by(
+                    bank_id=bank_id,
+                    policy_type_id=policy_type_id,
+                    document_hash=document_hash,
+                    is_active=True
+                ).update({'is_active': False})
+
+                created_ids = []
+                for idx, query_data in enumerate(queries_data, start=1):
+                    extraction_query = PolicyExtractionQuery(
+                        bank_id=bank_id,
+                        policy_type_id=policy_type_id,
+                        query_text=query_data.get('query_text', query_data.get('query', '')),
+                        response_text=query_data.get('response_text', query_data.get('response', '')),
+                        confidence_score=query_data.get('confidence_score', query_data.get('confidence')),
+                        document_hash=document_hash,
+                        source_document=source_document or query_data.get('source_document', ''),
+                        extraction_method=query_data.get('extraction_method', 'textract'),
+                        query_order=idx,
+                        is_active=True
+                    )
+                    session.add(extraction_query)
+                    session.flush()
+                    created_ids.append(extraction_query.id)
+
+                session.commit()
+                logger.info(f"Saved {len(created_ids)} extraction queries for {bank_id}/{policy_type_id}")
+                return created_ids
+
+        except Exception as e:
+            logger.error(f"Error saving extraction queries: {e}")
+            return []
+
+    def get_extraction_queries(self, bank_id: str, policy_type_id: str,
+                               document_hash: str = None, active_only: bool = True) -> List[Dict[str, Any]]:
+        """
+        Get extraction queries and responses for a bank and policy type
+
+        Args:
+            bank_id: Bank identifier
+            policy_type_id: Policy type identifier
+            document_hash: Optional document hash filter
+            active_only: Only return active queries
+
+        Returns:
+            List of query dictionaries
+        """
+        try:
+            with self.get_session() as session:
+                query = session.query(PolicyExtractionQuery).filter_by(
+                    bank_id=bank_id,
+                    policy_type_id=policy_type_id
+                )
+
+                if document_hash:
+                    query = query.filter_by(document_hash=document_hash)
+
+                if active_only:
+                    query = query.filter_by(is_active=True)
+
+                queries = query.order_by(PolicyExtractionQuery.query_order).all()
+
+                return [{
+                    'id': q.id,
+                    'query_text': q.query_text,
+                    'response_text': q.response_text,
+                    'confidence_score': float(q.confidence_score) if q.confidence_score is not None else None,
+                    'document_hash': q.document_hash,
+                    'source_document': q.source_document,
+                    'extraction_method': q.extraction_method,
+                    'query_order': q.query_order,
+                    'is_active': q.is_active,
+                    'created_at': q.created_at.isoformat() if q.created_at else None,
+                    'updated_at': q.updated_at.isoformat() if q.updated_at else None
+                } for q in queries]
+
+        except Exception as e:
+            logger.error(f"Error fetching extraction queries: {e}")
+            return []
+
+    def delete_extraction_queries(self, bank_id: str, policy_type_id: str, document_hash: str = None) -> bool:
+        """
+        Delete extraction queries for a bank and policy type
+
+        Args:
+            bank_id: Bank identifier
+            policy_type_id: Policy type identifier
+            document_hash: Optional document hash to delete specific document queries
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self.get_session() as session:
+                query = session.query(PolicyExtractionQuery).filter_by(
+                    bank_id=bank_id,
+                    policy_type_id=policy_type_id
+                )
+
+                if document_hash:
+                    query = query.filter_by(document_hash=document_hash)
+
+                query.delete()
+                session.commit()
+                logger.info(f"Deleted extraction queries for {bank_id}/{policy_type_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Error deleting extraction queries: {e}")
             return False
 
     # Utility methods

@@ -565,8 +565,19 @@ def list_banks():
 
 @app.route(ROUTE + '/api/v1/banks/<bank_id>/policies', methods=['GET'])
 def list_bank_policies(bank_id):
-    """List all available policy types for a specific bank"""
+    """
+    List all available policy types for a specific bank
+
+    Query parameters:
+    - include_queries: Include extraction queries count (optional, default: false)
+    - include_rules: Include extracted rules count (optional, default: false)
+    - details: Include full details with queries and rules (optional, default: false)
+    """
     try:
+        include_queries = request.args.get('include_queries', 'false').lower() == 'true'
+        include_rules = request.args.get('include_rules', 'false').lower() == 'true'
+        include_details = request.args.get('details', 'false').lower() == 'true'
+
         # Get active containers for this bank
         containers = db_service.list_containers(bank_id=bank_id, active_only=True)
 
@@ -577,21 +588,44 @@ def list_bank_policies(bank_id):
         all_policy_types = db_service.list_policy_types(active_only=True)
 
         # Filter to only include policy types that have containers for this bank
-        policies = [
-            {
-                "policy_type_id": pt['policy_type_id'],
-                "policy_name": pt['policy_name'],
-                "description": pt['description'],
-                "category": pt['category']
-            }
-            for pt in all_policy_types
-            if pt['policy_type_id'] in policy_type_ids
-        ]
+        policies = []
+        for pt in all_policy_types:
+            if pt['policy_type_id'] in policy_type_ids:
+                policy_data = {
+                    "policy_type_id": pt['policy_type_id'],
+                    "policy_name": pt['policy_name'],
+                    "description": pt['description'],
+                    "category": pt['category']
+                }
+
+                # Add counts if requested
+                if include_queries or include_details:
+                    extraction_queries = db_service.get_extraction_queries(
+                        bank_id=bank_id,
+                        policy_type_id=pt['policy_type_id'],
+                        active_only=True
+                    )
+                    policy_data["extraction_queries_count"] = len(extraction_queries)
+                    if include_details:
+                        policy_data["extraction_queries"] = extraction_queries
+
+                if include_rules or include_details:
+                    extracted_rules = db_service.get_extracted_rules(
+                        bank_id=bank_id,
+                        policy_type_id=pt['policy_type_id'],
+                        active_only=True
+                    )
+                    policy_data["extracted_rules_count"] = len(extracted_rules)
+                    if include_details:
+                        policy_data["extracted_rules"] = extracted_rules
+
+                policies.append(policy_data)
 
         return jsonify({
             "status": "success",
             "bank_id": bank_id,
-            "policies": policies
+            "policies": policies,
+            "total_policies": len(policies)
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -599,10 +633,20 @@ def list_bank_policies(bank_id):
 
 @app.route(ROUTE + '/api/v1/policies', methods=['GET'])
 def query_policies():
-    """Query for available policy containers"""
+    """
+    Query for available policy containers with extraction queries and rules
+
+    Query parameters:
+    - bank_id: Bank identifier (required)
+    - policy_type: Policy type identifier (required)
+    - include_queries: Include extraction queries (optional, default: false)
+    - include_rules: Include extracted rules (optional, default: false)
+    """
     try:
         bank_id = request.args.get('bank_id')
         policy_type = request.args.get('policy_type')
+        include_queries = request.args.get('include_queries', 'false').lower() == 'true'
+        include_rules = request.args.get('include_rules', 'false').lower() == 'true'
 
         if not bank_id or not policy_type:
             return jsonify({
@@ -618,7 +662,7 @@ def query_policies():
                 "message": f"No active container found for bank '{bank_id}' and policy type '{policy_type}'"
             }), 404
 
-        return jsonify({
+        response_data = {
             "status": "success",
             "container": {
                 "container_id": container['container_id'],
@@ -629,7 +673,29 @@ def query_policies():
                 "health_status": container['health_status'],
                 "deployed_at": container['deployed_at']
             }
-        })
+        }
+
+        # Include extraction queries if requested
+        if include_queries:
+            extraction_queries = db_service.get_extraction_queries(
+                bank_id=bank_id,
+                policy_type_id=policy_type,
+                active_only=True
+            )
+            response_data["extraction_queries"] = extraction_queries
+            response_data["extraction_queries_count"] = len(extraction_queries)
+
+        # Include extracted rules if requested
+        if include_rules:
+            extracted_rules = db_service.get_extracted_rules(
+                bank_id=bank_id,
+                policy_type_id=policy_type,
+                active_only=True
+            )
+            response_data["extracted_rules"] = extracted_rules
+            response_data["extracted_rules_count"] = len(extracted_rules)
+
+        return jsonify(response_data)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 

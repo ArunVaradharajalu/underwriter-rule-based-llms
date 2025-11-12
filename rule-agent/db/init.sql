@@ -236,6 +236,41 @@ LEFT JOIN rule_requests rr ON rc.id = rr.container_id
 WHERE rc.is_active = true
 GROUP BY rc.container_id, rc.bank_id, rc.policy_type_id;
 
+-- Policy extraction queries table (stores LLM queries and Textract responses)
+CREATE TABLE policy_extraction_queries (
+    id SERIAL PRIMARY KEY,
+    bank_id VARCHAR(50) REFERENCES banks(bank_id) ON DELETE CASCADE NOT NULL,
+    policy_type_id VARCHAR(50) REFERENCES policy_types(policy_type_id) ON DELETE CASCADE NOT NULL,
+
+    -- Query and response details
+    query_text TEXT NOT NULL,
+    response_text TEXT,
+    confidence_score NUMERIC(5, 2), -- Textract confidence score (0-100)
+
+    -- Metadata
+    document_hash VARCHAR(64) NOT NULL,
+    source_document VARCHAR(500),
+    extraction_method VARCHAR(50) DEFAULT 'textract', -- textract, manual, etc.
+    query_order INTEGER, -- Order in which query was generated
+
+    -- Status
+    is_active BOOLEAN DEFAULT true,
+
+    -- Timestamps
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_extraction_queries_bank_policy ON policy_extraction_queries(bank_id, policy_type_id);
+CREATE INDEX idx_extraction_queries_document_hash ON policy_extraction_queries(document_hash);
+CREATE INDEX idx_extraction_queries_active ON policy_extraction_queries(is_active);
+CREATE INDEX idx_extraction_queries_created_at ON policy_extraction_queries(created_at);
+CREATE INDEX idx_extraction_queries_confidence ON policy_extraction_queries(confidence_score) WHERE confidence_score IS NOT NULL;
+
+-- Trigger for policy_extraction_queries updated_at
+CREATE TRIGGER update_extraction_queries_updated_at BEFORE UPDATE ON policy_extraction_queries
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
 -- Grant permissions (adjust as needed)
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO underwriting_user;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO underwriting_user;
