@@ -16,6 +16,7 @@
 from PolicyAnalyzerAgent import PolicyAnalyzerAgent
 from TextractService import TextractService
 from RuleGeneratorAgent import RuleGeneratorAgent
+from HierarchicalRulesAgent import HierarchicalRulesAgent
 from DroolsDeploymentService import DroolsDeploymentService
 from S3Service import S3Service
 from ExcelRulesExporter import ExcelRulesExporter
@@ -46,6 +47,7 @@ class UnderwritingWorkflow:
         self.policy_analyzer = PolicyAnalyzerAgent(llm)
         self.textract = TextractService()
         self.rule_generator = RuleGeneratorAgent(llm)
+        self.hierarchical_rules_agent = HierarchicalRulesAgent(llm)
         self.drools_deployment = DroolsDeploymentService()
         self.s3_service = S3Service()
         self.excel_exporter = ExcelRulesExporter()
@@ -277,6 +279,52 @@ class UnderwritingWorkflow:
                 except Exception as e:
                     print(f"⚠ Failed to save Drools rules to database: {e}")
                     result["steps"]["save_drools_rules"] = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+
+            # Step 4.6: Generate and save hierarchical rules using LLM
+            if bank_id and policy_type:
+                try:
+                    print("\n" + "="*60)
+                    print("Step 4.6: Generating hierarchical rules with LLM...")
+                    print("="*60)
+
+                    # Generate hierarchical rules from policy text
+                    hierarchical_rules = self.hierarchical_rules_agent.generate_hierarchical_rules(
+                        policy_text=document_text,
+                        policy_type=policy_type
+                    )
+
+                    # Save to database
+                    if hierarchical_rules:
+                        saved_rule_ids = self.db_service.save_hierarchical_rules(
+                            bank_id=bank_id,
+                            policy_type_id=policy_type,
+                            rules_tree=hierarchical_rules,
+                            document_hash=document_hash,
+                            source_document=s3_key
+                        )
+
+                        print(f"✓ Saved {len(saved_rule_ids)} hierarchical rules to database")
+                        result["steps"]["save_hierarchical_rules"] = {
+                            "status": "success",
+                            "count": len(saved_rule_ids),
+                            "top_level_rules": len(hierarchical_rules),
+                            "rule_ids": saved_rule_ids
+                        }
+                    else:
+                        print("⚠ No hierarchical rules generated")
+                        result["steps"]["save_hierarchical_rules"] = {
+                            "status": "warning",
+                            "message": "No hierarchical rules generated"
+                        }
+
+                except Exception as e:
+                    print(f"⚠ Failed to generate/save hierarchical rules: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    result["steps"]["save_hierarchical_rules"] = {
                         "status": "error",
                         "message": str(e)
                     }

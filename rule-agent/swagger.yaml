@@ -20,7 +20,14 @@ info:
     - Health checking ensures high availability
     - LLM-generated queries and Textract responses stored for audit trail
 
-    **What's New in v2.2:**
+    **What's New in v2.3:**
+    - Hierarchical rules with parent-child dependencies
+    - Tree-structured rule organization with unlimited nesting depth
+    - Rule validation with pass/fail status and confidence scores
+    - Expected vs. actual value tracking for each rule
+    - Optional inclusion of hierarchical rules in API responses
+
+    **What's in v2.2:**
     - Pre-signed S3 URLs for all documents (policy, JAR, DRL, Excel)
     - Secure 24-hour expiring download links
     - Frontend-ready URLs requiring no AWS authentication
@@ -32,7 +39,7 @@ info:
     - Complete transparency into rule extraction process
     - Query performance and quality monitoring via confidence scores
 
-  version: 2.2.0
+  version: 2.3.0
   contact:
     name: IBM Automation
     url: https://github.com/DecisionsDev
@@ -121,13 +128,21 @@ paths:
             default: false
           description: Include extracted rule counts for each policy
           example: true
+        - name: include_hierarchical_rules
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include hierarchical rule counts for each policy
+          example: true
         - name: details
           in: query
           required: false
           schema:
             type: boolean
             default: false
-          description: Include full details with all queries and rules (overrides include_queries and include_rules)
+          description: Include full details with all queries, rules, and hierarchical rules (overrides all include_ parameters)
           example: false
       responses:
         '200':
@@ -170,6 +185,10 @@ paths:
                           type: integer
                           description: Number of extracted rules (only if include_rules or details is true)
                           example: 15
+                        hierarchical_rules_count:
+                          type: integer
+                          description: Number of top-level hierarchical rules (only if include_hierarchical_rules or details is true)
+                          example: 5
                         extraction_queries:
                           type: array
                           description: Full extraction queries (only if details is true)
@@ -180,6 +199,11 @@ paths:
                           description: Full extracted rules (only if details is true)
                           items:
                             $ref: '#/components/schemas/ExtractedRule'
+                        hierarchical_rules:
+                          type: array
+                          description: Full hierarchical rules tree (only if details is true)
+                          items:
+                            $ref: '#/components/schemas/HierarchicalRule'
 
   /api/v1/policies:
     get:
@@ -225,6 +249,14 @@ paths:
             default: false
           description: Include extracted underwriting rules
           example: true
+        - name: include_hierarchical_rules
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include hierarchical rules tree with parent-child dependencies
+          example: true
       responses:
         '200':
           description: Container information with optional extraction details
@@ -256,6 +288,15 @@ paths:
                     type: integer
                     description: Number of extracted rules (only if include_rules is true)
                     example: 15
+                  hierarchical_rules:
+                    type: array
+                    description: Hierarchical rules tree (only if include_hierarchical_rules is true)
+                    items:
+                      $ref: '#/components/schemas/HierarchicalRule'
+                  hierarchical_rules_count:
+                    type: integer
+                    description: Number of top-level hierarchical rules (only if include_hierarchical_rules is true)
+                    example: 5
               examples:
                 basic-response:
                   summary: Basic response (no optional data)
@@ -1186,6 +1227,50 @@ components:
         execution_time_ms:
           type: integer
           example: 45
+        hierarchical_rules:
+          type: array
+          description: Evaluated hierarchical rules showing which requirements were checked and their pass/fail status
+          items:
+            $ref: '#/components/schemas/EvaluatedHierarchicalRule'
+        rule_evaluation_summary:
+          type: object
+          description: Summary of hierarchical rules evaluation
+          properties:
+            total_rules:
+              type: integer
+              description: Total number of rules evaluated
+              example: 87
+            passed:
+              type: integer
+              description: Number of rules that passed
+              example: 75
+            failed:
+              type: integer
+              description: Number of rules that failed
+              example: 5
+            not_evaluated:
+              type: integer
+              description: Number of rules that could not be evaluated
+              example: 7
+            pass_rate:
+              type: number
+              format: float
+              description: Percentage of rules that passed
+              example: 86.21
+            failed_rules:
+              type: array
+              description: List of failed rules with details
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  expected:
+                    type: string
+                  actual:
+                    type: string
 
     WorkflowResult:
       type: object
@@ -1280,6 +1365,97 @@ components:
           format: date-time
           description: Timestamp when the record was last updated
           example: "2025-11-10T10:30:00"
+
+    HierarchicalRule:
+      type: object
+      description: A rule in a hierarchical tree structure with parent-child dependencies
+      properties:
+        id:
+          type: string
+          description: Dot-notation ID representing position in hierarchy
+          example: "11.1.1.1.1"
+        name:
+          type: string
+          description: Name or title of the rule
+          example: "Verify applicant age"
+        description:
+          type: string
+          description: Detailed description of the rule requirement
+          example: "Check if the applicant meets the minimum age requirement of 18 years"
+        expected:
+          type: string
+          description: Expected value or condition
+          example: "Age >= 18"
+        actual:
+          type: string
+          description: Actual value or result
+          example: "Age = 25"
+        confidence:
+          type: number
+          format: float
+          description: Confidence score for this rule (0-1)
+          minimum: 0
+          maximum: 1
+          example: 0.95
+        passed:
+          type: boolean
+          description: Whether the rule passed validation
+          example: true
+        dependencies:
+          type: array
+          description: Child rules that this rule depends on
+          items:
+            $ref: '#/components/schemas/HierarchicalRule'
+          example:
+            - id: "11.1.1.1.1.1"
+              name: "Verify birth date"
+              description: "Extract and validate birth date from application"
+              expected: "Valid date format"
+              actual: "1998-05-15"
+              confidence: 0.98
+              passed: true
+              dependencies: []
+
+    EvaluatedHierarchicalRule:
+      type: object
+      description: A hierarchical rule that has been evaluated against application data with actual values and pass/fail status
+      properties:
+        id:
+          type: string
+          description: Dot-notation ID representing position in hierarchy
+          example: "1.1.1"
+        name:
+          type: string
+          description: Name or title of the rule
+          example: "Minimum Age Check"
+        description:
+          type: string
+          description: Detailed description of the rule requirement
+          example: "Verify applicant is at least 18 years old"
+        expected:
+          type: string
+          description: Expected value or condition
+          example: "Age >= 18"
+        actual:
+          type: string
+          description: Actual value from application data
+          example: "Age = 35"
+        confidence:
+          type: number
+          format: float
+          description: LLM confidence score for this rule (0-1)
+          minimum: 0
+          maximum: 1
+          example: 0.99
+        passed:
+          type: boolean
+          description: Whether the rule passed validation (true/false/null if not evaluated)
+          example: true
+        dependencies:
+          type: array
+          description: Child rules that this rule depends on (also evaluated)
+          items:
+            $ref: '#/components/schemas/EvaluatedHierarchicalRule'
 
     ExtractionQuery:
       type: object

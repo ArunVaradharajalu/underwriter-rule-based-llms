@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, CheckConstraint, Index, text
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, Float, ForeignKey, CheckConstraint, Index, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -251,6 +251,50 @@ class PolicyExtractionQuery(Base):
         Index('idx_extraction_queries_document_hash', 'document_hash'),
         Index('idx_extraction_queries_active', 'is_active'),
         Index('idx_extraction_queries_created_at', 'created_at'),
+    )
+
+
+class HierarchicalRule(Base):
+    __tablename__ = 'hierarchical_rules'
+
+    id = Column(Integer, primary_key=True)
+    bank_id = Column(String(50), ForeignKey('banks.bank_id', ondelete='CASCADE'), nullable=False)
+    policy_type_id = Column(String(50), ForeignKey('policy_types.policy_type_id', ondelete='CASCADE'), nullable=False)
+
+    # Rule details
+    rule_id = Column(String(50), nullable=False)  # e.g., "1", "5.1", "11.1.1.1.1"
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    expected = Column(String(255))
+    actual = Column(String(255))
+    confidence = Column(Float)
+    passed = Column(Boolean)
+
+    # Hierarchy
+    parent_id = Column(Integer, ForeignKey('hierarchical_rules.id', ondelete='CASCADE'))
+    level = Column(Integer, default=0)  # 0 for root, 1 for first level children, etc.
+    order_index = Column(Integer, default=0)  # For maintaining order within same parent
+
+    # Metadata
+    document_hash = Column(String(64))
+    source_document = Column(String(500))
+    is_active = Column(Boolean, default=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    bank = relationship("Bank")
+    policy_type = relationship("PolicyType")
+    parent = relationship("HierarchicalRule", remote_side=[id], backref="children")
+
+    __table_args__ = (
+        Index('idx_hierarchical_rules_bank_policy', 'bank_id', 'policy_type_id'),
+        Index('idx_hierarchical_rules_parent', 'parent_id'),
+        Index('idx_hierarchical_rules_active', 'is_active'),
+        Index('idx_hierarchical_rules_hash', 'document_hash'),
+        Index('idx_hierarchical_rules_level', 'level'),
     )
 
 
@@ -850,6 +894,137 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Database health check failed: {e}")
             return False
+
+    # Hierarchical Rules operations
+    def save_hierarchical_rules(self, bank_id: str, policy_type_id: str, rules_tree: List[Dict[str, Any]],
+                                document_hash: str = None, source_document: str = None) -> List[int]:
+        """
+        Save hierarchical rules tree to database
+
+        Args:
+            bank_id: Bank identifier
+            policy_type_id: Policy type identifier
+            rules_tree: List of root-level rules, each with optional 'dependencies' array
+            document_hash: Hash of source document
+            source_document: Path/name of source document
+
+        Returns:
+            List of created rule IDs
+        """
+        with self.get_session() as session:
+            created_ids = []
+
+            def save_rule_recursive(rule_data: Dict[str, Any], parent_id: int = None, level: int = 0, order: int = 0) -> int:
+                """Recursively save a rule and its children"""
+                rule = HierarchicalRule(
+                    bank_id=bank_id,
+                    policy_type_id=policy_type_id,
+                    rule_id=rule_data.get('id', ''),
+                    name=rule_data.get('name', ''),
+                    description=rule_data.get('description'),
+                    expected=rule_data.get('expected'),
+                    actual=rule_data.get('actual'),
+                    confidence=rule_data.get('confidence'),
+                    passed=rule_data.get('passed'),
+                    parent_id=parent_id,
+                    level=level,
+                    order_index=order,
+                    document_hash=document_hash,
+                    source_document=source_document
+                )
+                session.add(rule)
+                session.flush()  # Get the ID without committing
+
+                created_ids.append(rule.id)
+
+                # Process dependencies (children)
+                if 'dependencies' in rule_data and rule_data['dependencies']:
+                    for idx, child_rule in enumerate(rule_data['dependencies']):
+                        save_rule_recursive(child_rule, parent_id=rule.id, level=level + 1, order=idx)
+
+                return rule.id
+
+            # Save all root-level rules
+            for idx, root_rule in enumerate(rules_tree):
+                save_rule_recursive(root_rule, parent_id=None, level=0, order=idx)
+
+            session.commit()
+            logger.info(f"Saved {len(created_ids)} hierarchical rules for {bank_id}/{policy_type_id}")
+            return created_ids
+
+    def get_hierarchical_rules(self, bank_id: str, policy_type_id: str, active_only: bool = True) -> List[Dict[str, Any]]:
+        """
+        Get hierarchical rules tree for a bank and policy type
+
+        Args:
+            bank_id: Bank identifier
+            policy_type_id: Policy type identifier
+            active_only: Only return active rules
+
+        Returns:
+            List of root-level rules with nested dependencies
+        """
+        with self.get_session() as session:
+            query = session.query(HierarchicalRule).filter_by(
+                bank_id=bank_id,
+                policy_type_id=policy_type_id
+            )
+            if active_only:
+                query = query.filter_by(is_active=True)
+
+            all_rules = query.order_by(HierarchicalRule.level, HierarchicalRule.order_index).all()
+
+            if not all_rules:
+                return []
+
+            # Build a lookup dictionary
+            rules_by_id = {}
+            for rule in all_rules:
+                rules_by_id[rule.id] = {
+                    'id': rule.rule_id,
+                    'name': rule.name,
+                    'description': rule.description,
+                    'expected': rule.expected,
+                    'actual': rule.actual,
+                    'confidence': rule.confidence,
+                    'passed': rule.passed,
+                    'dependencies': []
+                }
+
+            # Build tree structure
+            root_rules = []
+            for rule in all_rules:
+                rule_dict = rules_by_id[rule.id]
+
+                if rule.parent_id is None:
+                    # Root level rule
+                    root_rules.append(rule_dict)
+                else:
+                    # Child rule - add to parent's dependencies
+                    if rule.parent_id in rules_by_id:
+                        rules_by_id[rule.parent_id]['dependencies'].append(rule_dict)
+
+            return root_rules
+
+    def delete_hierarchical_rules(self, bank_id: str, policy_type_id: str) -> int:
+        """
+        Delete all hierarchical rules for a bank and policy type
+
+        Args:
+            bank_id: Bank identifier
+            policy_type_id: Policy type identifier
+
+        Returns:
+            Number of rules deleted
+        """
+        with self.get_session() as session:
+            deleted_count = session.query(HierarchicalRule).filter_by(
+                bank_id=bank_id,
+                policy_type_id=policy_type_id
+            ).delete()
+            session.commit()
+            logger.info(f"Deleted {deleted_count} hierarchical rules for {bank_id}/{policy_type_id}")
+            return deleted_count
 
     def get_banks_with_policies(self) -> List[Dict[str, Any]]:
         """Get all banks with their available policy types"""

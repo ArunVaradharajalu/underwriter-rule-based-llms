@@ -26,6 +26,7 @@ from UnderwritingWorkflow import UnderwritingWorkflow
 from RuleCacheService import get_rule_cache
 from DatabaseService import get_database_service
 from S3Service import S3Service
+from DroolsHierarchicalMapper import DroolsHierarchicalMapper
 import json,os
 from Utils import find_descriptors
 from werkzeug.utils import secure_filename
@@ -571,11 +572,13 @@ def list_bank_policies(bank_id):
     Query parameters:
     - include_queries: Include extraction queries count (optional, default: false)
     - include_rules: Include extracted rules count (optional, default: false)
+    - include_hierarchical_rules: Include hierarchical rules count (optional, default: false)
     - details: Include full details with queries and rules (optional, default: false)
     """
     try:
         include_queries = request.args.get('include_queries', 'false').lower() == 'true'
         include_rules = request.args.get('include_rules', 'false').lower() == 'true'
+        include_hierarchical_rules = request.args.get('include_hierarchical_rules', 'false').lower() == 'true'
         include_details = request.args.get('details', 'false').lower() == 'true'
 
         # Get active containers for this bank
@@ -619,6 +622,16 @@ def list_bank_policies(bank_id):
                     if include_details:
                         policy_data["extracted_rules"] = extracted_rules
 
+                if include_hierarchical_rules or include_details:
+                    hierarchical_rules = db_service.get_hierarchical_rules(
+                        bank_id=bank_id,
+                        policy_type_id=pt['policy_type_id'],
+                        active_only=True
+                    )
+                    policy_data["hierarchical_rules_count"] = len(hierarchical_rules)
+                    if include_details:
+                        policy_data["hierarchical_rules"] = hierarchical_rules
+
                 policies.append(policy_data)
 
         return jsonify({
@@ -641,12 +654,14 @@ def query_policies():
     - policy_type: Policy type identifier (required)
     - include_queries: Include extraction queries (optional, default: false)
     - include_rules: Include extracted rules (optional, default: false)
+    - include_hierarchical_rules: Include hierarchical rules tree (optional, default: false)
     """
     try:
         bank_id = request.args.get('bank_id')
         policy_type = request.args.get('policy_type')
         include_queries = request.args.get('include_queries', 'false').lower() == 'true'
         include_rules = request.args.get('include_rules', 'false').lower() == 'true'
+        include_hierarchical_rules = request.args.get('include_hierarchical_rules', 'false').lower() == 'true'
 
         if not bank_id or not policy_type:
             return jsonify({
@@ -723,6 +738,16 @@ def query_policies():
             )
             response_data["extracted_rules"] = extracted_rules
             response_data["extracted_rules_count"] = len(extracted_rules)
+
+        # Include hierarchical rules if requested
+        if include_hierarchical_rules:
+            hierarchical_rules = db_service.get_hierarchical_rules(
+                bank_id=bank_id,
+                policy_type_id=policy_type,
+                active_only=True
+            )
+            response_data["hierarchical_rules"] = hierarchical_rules
+            response_data["hierarchical_rules_count"] = len(hierarchical_rules)
 
         return jsonify(response_data)
     except Exception as e:
@@ -822,14 +847,57 @@ def evaluate_policy():
                 'status_code': 200
             })
 
-            return jsonify({
+            # Map Drools decision to hierarchical rules
+            hierarchical_rules_result = None
+            try:
+                # Get hierarchical rules from database
+                hierarchical_rules = db_service.get_hierarchical_rules(
+                    bank_id=bank_id,
+                    policy_type_id=policy_type,
+                    active_only=True
+                )
+
+                if hierarchical_rules:
+                    # Map Drools decision data to hierarchical rules
+                    # This uses Drools as the source of truth (no re-evaluation)
+                    mapper = DroolsHierarchicalMapper()
+                    mapped_rules = mapper.map_drools_to_hierarchical_rules(
+                        hierarchical_rules=hierarchical_rules,
+                        drools_decision=decision,
+                        applicant_data=applicant,
+                        policy_data=policy_data
+                    )
+
+                    # Get evaluation summary
+                    evaluation_summary = mapper.get_evaluation_summary(mapped_rules)
+
+                    hierarchical_rules_result = {
+                        "rules": mapped_rules,
+                        "summary": evaluation_summary
+                    }
+
+                    print(f"✓ Mapped {evaluation_summary['total_rules']} hierarchical rules from Drools decision")
+            except Exception as map_error:
+                print(f"⚠ Failed to map hierarchical rules: {map_error}")
+                import traceback
+                traceback.print_exc()
+                # Don't fail the request if hierarchical rules mapping fails
+
+            response = {
                 "status": "success",
                 "bank_id": bank_id,
                 "policy_type": policy_type,
                 "container_id": container['container_id'],
                 "decision": decision,
                 "execution_time_ms": execution_time
-            })
+            }
+
+            # Add hierarchical rules if available
+            if hierarchical_rules_result:
+                response["hierarchical_rules"] = hierarchical_rules_result["rules"]
+                response["rule_evaluation_summary"] = hierarchical_rules_result["summary"]
+
+            return jsonify(response)
 
         except Exception as rule_error:
             execution_time = int((time.time() - start_time) * 1000)
