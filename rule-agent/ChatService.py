@@ -675,6 +675,35 @@ def query_policies():
             }
         }
 
+        # Add S3 URLs and generate pre-signed URLs for documents
+        if container.get('s3_policy_url'):
+            response_data["container"]["s3_policy_url"] = container['s3_policy_url']
+            # Generate pre-signed URL for policy document
+            policy_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_policy_url'], expiration=86400)
+            if policy_presigned:
+                response_data["container"]["policy_presigned_url"] = policy_presigned
+
+        if container.get('s3_jar_url'):
+            response_data["container"]["s3_jar_url"] = container['s3_jar_url']
+            # Generate pre-signed URL for JAR file
+            jar_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_jar_url'], expiration=86400)
+            if jar_presigned:
+                response_data["container"]["jar_presigned_url"] = jar_presigned
+
+        if container.get('s3_drl_url'):
+            response_data["container"]["s3_drl_url"] = container['s3_drl_url']
+            # Generate pre-signed URL for DRL file
+            drl_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_drl_url'], expiration=86400)
+            if drl_presigned:
+                response_data["container"]["drl_presigned_url"] = drl_presigned
+
+        if container.get('s3_excel_url'):
+            response_data["container"]["s3_excel_url"] = container['s3_excel_url']
+            # Generate pre-signed URL for Excel file
+            excel_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_excel_url'], expiration=86400)
+            if excel_presigned:
+                response_data["container"]["excel_presigned_url"] = excel_presigned
+
         # Include extraction queries if requested
         if include_queries:
             extraction_queries = db_service.get_extraction_queries(
@@ -883,27 +912,50 @@ def get_deployment(deployment_id):
         # Get statistics
         stats = db_service.get_container_stats(container['container_id'])
 
+        deployment_data = {
+            "id": container['id'],
+            "container_id": container['container_id'],
+            "bank_id": container['bank_id'],
+            "policy_type_id": container['policy_type_id'],
+            "endpoint": container['endpoint'],
+            "status": container['status'],
+            "health_status": container['health_status'],
+            "platform": container['platform'],
+            "port": container['port'],
+            "version": container['version'],
+            "is_active": container['is_active'],
+            "deployed_at": container['deployed_at'],
+            "document_hash": container['document_hash'],
+            "s3_policy_url": container['s3_policy_url'],
+            "s3_jar_url": container['s3_jar_url'],
+            "s3_drl_url": container['s3_drl_url'],
+            "s3_excel_url": container['s3_excel_url']
+        }
+
+        # Generate pre-signed URLs for all S3 documents
+        if container.get('s3_policy_url'):
+            policy_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_policy_url'], expiration=86400)
+            if policy_presigned:
+                deployment_data["policy_presigned_url"] = policy_presigned
+
+        if container.get('s3_jar_url'):
+            jar_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_jar_url'], expiration=86400)
+            if jar_presigned:
+                deployment_data["jar_presigned_url"] = jar_presigned
+
+        if container.get('s3_drl_url'):
+            drl_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_drl_url'], expiration=86400)
+            if drl_presigned:
+                deployment_data["drl_presigned_url"] = drl_presigned
+
+        if container.get('s3_excel_url'):
+            excel_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_excel_url'], expiration=86400)
+            if excel_presigned:
+                deployment_data["excel_presigned_url"] = excel_presigned
+
         return jsonify({
             "status": "success",
-            "deployment": {
-                "id": container['id'],
-                "container_id": container['container_id'],
-                "bank_id": container['bank_id'],
-                "policy_type_id": container['policy_type_id'],
-                "endpoint": container['endpoint'],
-                "status": container['status'],
-                "health_status": container['health_status'],
-                "platform": container['platform'],
-                "port": container['port'],
-                "version": container['version'],
-                "is_active": container['is_active'],
-                "deployed_at": container['deployed_at'],
-                "document_hash": container['document_hash'],
-                "s3_policy_url": container['s3_policy_url'],
-                "s3_jar_url": container['s3_jar_url'],
-                "s3_drl_url": container['s3_drl_url'],
-                "s3_excel_url": container['s3_excel_url']
-            },
+            "deployment": deployment_data,
             "statistics": stats
         })
     except Exception as e:

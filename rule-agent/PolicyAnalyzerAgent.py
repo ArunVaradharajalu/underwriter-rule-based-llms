@@ -35,55 +35,116 @@ class PolicyAnalyzerAgent:
         self.use_toc_mode = os.getenv("USE_TOC_EXTRACTION", "true").lower() == "true"
 
         self.analysis_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert insurance policy analyst specializing in underwriting rules.
+            ("system", """You are an expert insurance policy analyst specializing in underwriting rules with multi-level dependencies.
 
-Your task is to analyze policy document text and identify ALL underwriting criteria that need to be extracted.
+Your task is to analyze policy document text and identify ALL underwriting criteria, including STAGED EVALUATION rules where later decisions depend on earlier outcomes.
 
 CRITICAL: Extract EVERY policy, rule, threshold, limit, and requirement - do not skip any.
 
-Focus on extracting:
-- Coverage limits and amounts (min/max)
-- Age restrictions and requirements
-- Eligibility criteria (ALL conditions)
-- Income and credit requirements
-- Debt-to-income (DTI) ratios
-- Loan-to-value (LTV) ratios
-- Premium calculation factors
-- Excluded conditions or situations
-- Risk assessment criteria
-- Required documentation
-- Approval/denial thresholds
-- Employment requirements
-- Collateral requirements
-- Exception criteria
+=== MULTI-LEVEL DEPENDENCY DETECTION ===
 
-Generate specific, targeted queries that AWS Textract can use to extract precise data from the document.
+Many policies use SEQUENTIAL STAGES where rules build upon previous results:
 
-Return a JSON object with this structure:
+Stage 1 - PRIMARY CLASSIFICATION:
+- Look for rules that establish CATEGORIES or TIERS (e.g., "Credit Tier A/B/C", "Risk Category 1-5")
+- These are typically based on simple thresholds (e.g., "Score 750+ = Tier A")
+
+Stage 2 - DEPENDENT REQUIREMENTS:
+- Look for rules that use COMBINATIONS of factors (e.g., "For Tier A with excellent health...")
+- These create MATRICES of conditions (Credit Tier × Health Status → Income requirement)
+- Identify phrases: "based on the combination of", "determined by", "using the established tier"
+
+Stage 3 - COMPOUND RESTRICTIONS:
+- Look for rules that reference MULTIPLE previous stages
+- Example: "Smokers with Risk Category 3 require manual review"
+
+Stage 4 - POINT-BASED SCORING:
+- Look for systems that ACCUMULATE points from multiple factors
+- Example: "Credit Tier adds X points, Age adds Y points, Total determines Category"
+
+Stage 5 - SEQUENTIAL CALCULATIONS:
+- Look for calculations applied IN ORDER where order matters
+- Example: "Base premium × Credit Multiplier × Health Multiplier × Smoking Multiplier"
+
+SPECIAL PATTERNS TO DETECT:
+- Rejection matrices: "Tier C + Fair Health = automatic rejection"
+- Conditional caps: "Smokers over 50 limited to $250,000"
+- Multi-factor gates: "Coverage > $500K requires assets > 3× income"
+
+=== QUERY GENERATION STRATEGY ===
+
+For SIMPLE rules, generate simple queries:
+- "What is the minimum age requirement?"
+- "What is the maximum coverage amount?"
+
+For COMPOUND rules with dependencies, generate CONTEXT-AWARE queries:
+- "What is the minimum income for Tier A applicants with excellent health?"
+- "What is the maximum DTI ratio for Tier B applicants aged 36-50?"
+- "What special rejection rule applies to Tier C with fair health?"
+- "How many risk points does Credit Tier A receive?"
+- "What premium multiplier applies to Risk Category 3?"
+
+For MATRICES (e.g., 3×3 combinations), generate queries for ALL cells:
+- "Tier A + Excellent Health income requirement"
+- "Tier A + Good Health income requirement"
+- "Tier A + Fair Health income requirement"
+- (repeat for Tier B and Tier C)
+
+=== OUTPUT STRUCTURE ===
+
+Return a JSON object with this ENHANCED structure:
 {{
     "queries": [
         "What is the maximum coverage amount?",
-        "What is the minimum age requirement for applicants?",
-        "What is the maximum age limit for applicants?",
-        "What is the maximum debt-to-income ratio?",
-        "What is the minimum credit score required?"
+        "What credit score is required for Tier A classification?",
+        "What is the minimum income for Tier A applicants with excellent health?",
+        ...
     ],
     "key_sections": [
-        "Coverage Limits",
-        "Eligibility Requirements",
-        "Credit Requirements"
+        "Primary Eligibility",
+        "Income Requirements by Tier and Health",
+        "Risk Category Classification"
     ],
     "rule_categories": [
         "age_restrictions",
-        "coverage_limits",
-        "credit_requirements"
+        "credit_tier_classification",
+        "income_requirements_by_tier_and_health",
+        "risk_scoring_system"
+    ],
+    "dependency_stages": [
+        {{
+            "stage_number": 1,
+            "stage_name": "Primary Eligibility / Classification",
+            "article_section": "Article II",
+            "establishes": ["CreditTier", "HealthStatus", "AgeBracket"],
+            "queries": ["What credit score defines Tier A?", ...]
+        }},
+        {{
+            "stage_number": 2,
+            "stage_name": "Financial Capacity Requirements",
+            "article_section": "Article III",
+            "depends_on": ["CreditTier", "HealthStatus", "AgeBracket"],
+            "queries": ["What is minimum income for Tier A + Excellent Health?", ...]
+        }}
+    ],
+    "intermediate_facts": [
+        "CreditTier (A/B/C based on credit score)",
+        "RiskCategory (1-5 based on total points)",
+        "HealthStatus (excellent/good/fair)"
+    ],
+    "special_rejection_rules": [
+        "Tier C with Fair Health",
+        "Smokers over 55 with Fair Health"
     ]
 }}
 
 IMPORTANT:
-- Generate AT LEAST 15-25 queries to ensure comprehensive coverage
-- Extract BOTH positive criteria (what IS allowed) and negative criteria (what is NOT allowed)
-- Include ALL numeric thresholds, percentages, and limits
+- Generate 25-50 queries for complex multi-stage policies (more than simple policies)
+- For matrices, generate queries for EACH combination explicitly
+- Identify intermediate classifications that are used in later rules
+- Extract BOTH simple thresholds and compound conditions
+- Mark which queries depend on establishing earlier facts first
+- Detect special rejection rules that combine multiple factors
 - Make queries specific and actionable - each query should extract a concrete value or fact
 - Do NOT summarize - extract EVERY distinct policy separately"""),
             ("user", "Policy document text:\n\n{document_text}")
@@ -118,7 +179,7 @@ IMPORTANT:
             else:
                 result = self.chain.invoke({"document_text": document_text})
 
-            # Ensure result has expected structure
+            # Ensure result has expected structure (basic fields)
             if "queries" not in result:
                 result["queries"] = []
 
@@ -128,10 +189,40 @@ IMPORTANT:
             if "rule_categories" not in result:
                 result["rule_categories"] = []
 
+            # Ensure result has enhanced structure for multi-level dependencies (optional fields)
+            if "dependency_stages" not in result:
+                result["dependency_stages"] = []
+
+            if "intermediate_facts" not in result:
+                result["intermediate_facts"] = []
+
+            if "special_rejection_rules" not in result:
+                result["special_rejection_rules"] = []
+
             # Warning if too few queries generated
             if len(result['queries']) < 10:
                 print(f"⚠ WARNING: Only {len(result['queries'])} queries generated - may be missing policies!")
                 print("  Consider manual review to ensure completeness")
+
+            # Enhanced logging for multi-level policies
+            if len(result.get('dependency_stages', [])) > 0:
+                print(f"✓ Multi-level policy detected: {len(result['dependency_stages'])} dependency stages found")
+                for stage in result['dependency_stages'][:3]:  # Show first 3 stages
+                    stage_name = stage.get('stage_name', 'Unknown')
+                    establishes = stage.get('establishes', [])
+                    depends_on = stage.get('depends_on', [])
+                    if establishes:
+                        print(f"  Stage {stage.get('stage_number', '?')}: {stage_name} (establishes: {', '.join(establishes)})")
+                    elif depends_on:
+                        print(f"  Stage {stage.get('stage_number', '?')}: {stage_name} (depends on: {', '.join(depends_on)})")
+                    else:
+                        print(f"  Stage {stage.get('stage_number', '?')}: {stage_name}")
+
+            if len(result.get('intermediate_facts', [])) > 0:
+                print(f"✓ Intermediate facts identified: {', '.join(result['intermediate_facts'][:5])}")
+
+            if len(result.get('special_rejection_rules', [])) > 0:
+                print(f"✓ Special rejection rules found: {len(result['special_rejection_rules'])}")
 
             print(f"✓ Policy analysis complete: {len(result['queries'])} queries generated")
             return result

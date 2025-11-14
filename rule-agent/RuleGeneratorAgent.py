@@ -29,23 +29,39 @@ class RuleGeneratorAgent:
         self.llm = llm
 
         self.rule_generation_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert in insurance underwriting rules and Drools rule engine.
+            ("system", """You are an expert in insurance underwriting rules and Drools rule engine, specializing in multi-level dependency rules.
 
-Given extracted policy data, generate executable Drools DRL (Drools Rule Language) rules.
+Given extracted policy data, generate executable Drools DRL (Drools Rule Language) rules that handle SEQUENTIAL EVALUATION where rules build upon previous outcomes.
 
 IMPORTANT: Use 'declare' statements to define types directly in the DRL file. Do NOT import external Java classes.
 
-The rules should follow this structure:
+=== MULTI-LEVEL DEPENDENCY PATTERNS ===
+
+Many policies require STAGED EVALUATION where:
+1. Early rules establish INTERMEDIATE FACTS (CreditTier, RiskCategory)
+2. Later rules DEPEND on those facts to make decisions
+3. Rules must execute IN ORDER using SALIENCE
+
+The rules should follow this structure for MULTI-LEVEL policies:
 
 ```drl
 package com.underwriting.rules;
 
-// Declare types directly in DRL (no external Java classes needed)
+// ============================================================================
+// PART 1: DECLARE ALL TYPES (including intermediate facts for multi-level rules)
+// ============================================================================
+
+// Main input types
 declare Applicant
     name: String
     age: int
+    creditScore: int
+    health: String  // "excellent", "good", "fair"
+    annualIncome: double
+    debtToIncomeRatio: double
+    smoking: boolean
     occupation: String
-    healthConditions: String
+    occupationType: String  // "standard", "hazardous"
 end
 
 declare Policy
@@ -54,15 +70,46 @@ declare Policy
     term: int
 end
 
+// Intermediate fact types for multi-level dependencies
+declare CreditTier
+    tier: String  // "A" (750+), "B" (700-749), "C" (600-699)
+end
+
+declare AgeBracket
+    bracket: String  // "young" (18-35), "middle" (36-50), "senior" (51-65)
+end
+
+declare RiskPoints
+    factor: String  // "credit", "age", "health", "smoking", "dti", "occupation"
+    points: int
+end
+
+declare RiskCategory
+    category: int  // 1 (low) through 5 (very high)
+    totalPoints: int
+end
+
+declare ApprovalStatus
+    stage: String  // "primary", "financial", "risk", "final"
+    passed: boolean
+    reason: String
+end
+
+// Final decision type
 declare Decision
     approved: boolean
     reasons: java.util.List
     requiresManualReview: boolean
     premiumMultiplier: double
+    riskCategory: int
 end
 
-// Rules using the declared types
+// ============================================================================
+// PART 2: INITIALIZATION RULES (Highest Salience)
+// ============================================================================
+
 rule "Initialize Decision"
+    salience 10000
     when
         not Decision()
     then
@@ -71,61 +118,327 @@ rule "Initialize Decision"
         decision.setReasons(new java.util.ArrayList());
         decision.setRequiresManualReview(false);
         decision.setPremiumMultiplier(1.0);
+        decision.setRiskCategory(0);
         insert(decision);
 end
 
-rule "Age Requirement Check"
+// ============================================================================
+// PART 3: STAGE 1 - ESTABLISH CLASSIFICATIONS (Salience 9000-9999)
+// ============================================================================
+
+rule "Establish Credit Tier A"
+    salience 9000
+    when
+        $applicant : Applicant( creditScore >= 750 )
+        not CreditTier()
+    then
+        CreditTier ct = new CreditTier();
+        ct.setTier("A");
+        insert(ct);
+end
+
+rule "Establish Credit Tier B"
+    salience 9000
+    when
+        $applicant : Applicant( creditScore >= 700, creditScore < 750 )
+        not CreditTier()
+    then
+        CreditTier ct = new CreditTier();
+        ct.setTier("B");
+        insert(ct);
+end
+
+rule "Establish Credit Tier C"
+    salience 9000
+    when
+        $applicant : Applicant( creditScore >= 600, creditScore < 700 )
+        not CreditTier()
+    then
+        CreditTier ct = new CreditTier();
+        ct.setTier("C");
+        insert(ct);
+end
+
+rule "Establish Age Bracket - Young"
+    salience 9000
+    when
+        $applicant : Applicant( age >= 18, age <= 35 )
+        not AgeBracket()
+    then
+        AgeBracket ab = new AgeBracket();
+        ab.setBracket("young");
+        insert(ab);
+end
+
+rule "Establish Age Bracket - Middle"
+    salience 9000
+    when
+        $applicant : Applicant( age >= 36, age <= 50 )
+        not AgeBracket()
+    then
+        AgeBracket ab = new AgeBracket();
+        ab.setBracket("middle");
+        insert(ab);
+end
+
+rule "Establish Age Bracket - Senior"
+    salience 9000
+    when
+        $applicant : Applicant( age >= 51, age <= 65 )
+        not AgeBracket()
+    then
+        AgeBracket ab = new AgeBracket();
+        ab.setBracket("senior");
+        insert(ab);
+end
+
+// ============================================================================
+// PART 4: STAGE 1 - PRIMARY ELIGIBILITY CHECKS (Salience 8000-8999)
+// ============================================================================
+
+rule "Reject - Age Out of Range"
+    salience 8500
     when
         $applicant : Applicant( age < 18 || age > 65 )
         $decision : Decision()
     then
         $decision.setApproved(false);
-        $decision.getReasons().add("Applicant age is outside acceptable range");
+        $decision.getReasons().add("Applicant age must be between 18 and 65");
         update($decision);
 end
 
-rule "Coverage vs Income Limit Check"
+rule "Reject - Credit Score Too Low"
+    salience 8500
     when
-        $applicant : Applicant( $income : annualIncome )
-        $policy : Policy( coverageAmount > ($income * 10) )
+        $applicant : Applicant( creditScore < 600 )
         $decision : Decision()
     then
         $decision.setApproved(false);
-        $decision.getReasons().add("Coverage amount exceeds 10x annual income");
+        $decision.getReasons().add("Minimum credit score of 600 required");
         update($decision);
 end
 
-rule "Age and Coverage Combined Check"
+// ============================================================================
+// PART 5: STAGE 2 - COMPOUND CONDITION CHECKS (Salience 7000-7999)
+// These rules depend on CreditTier being established first
+// ============================================================================
+
+rule "Reject - Tier C with Fair Health"
+    salience 7500
     when
-        $applicant : Applicant( age > 50, $income : annualIncome )
-        $policy : Policy( coverageAmount > 500000, coverageAmount > ($income * 5) )
+        CreditTier( tier == "C" )
+        $applicant : Applicant( health == "fair" )
         $decision : Decision()
     then
         $decision.setApproved(false);
-        $decision.getReasons().add("High coverage requires manual review for age 50+");
+        $decision.getReasons().add("Tier C applicants with fair health are not eligible");
         update($decision);
+end
+
+rule "Income Check - Tier A Excellent Health"
+    salience 7000
+    when
+        CreditTier( tier == "A" )
+        $applicant : Applicant( health == "excellent", annualIncome < 20000 )
+        $decision : Decision()
+    then
+        $decision.setApproved(false);
+        $decision.getReasons().add("Tier A with excellent health requires minimum income $20,000");
+        update($decision);
+end
+
+rule "Income Check - Tier A Good Health"
+    salience 7000
+    when
+        CreditTier( tier == "A" )
+        $applicant : Applicant( health == "good", annualIncome < 25000 )
+        $decision : Decision()
+    then
+        $decision.setApproved(false);
+        $decision.getReasons().add("Tier A with good health requires minimum income $25,000");
+        update($decision);
+end
+
+rule "Coverage Limit Check - Tier A Excellent Health"
+    salience 7000
+    when
+        CreditTier( tier == "A" )
+        $applicant : Applicant( health == "excellent", $income : annualIncome )
+        $policy : Policy( coverageAmount > ($income * 12) )
+        $decision : Decision()
+    then
+        $decision.setApproved(false);
+        $decision.getReasons().add("Tier A with excellent health limited to 12x annual income");
+        update($decision);
+end
+
+// ============================================================================
+// PART 6: STAGE 3 - RISK POINT CALCULATION (Salience 6000-6999)
+// ============================================================================
+
+rule "Calculate Risk Points - Credit Tier"
+    salience 6000
+    when
+        CreditTier( $tier : tier )
+        not RiskPoints( factor == "credit" )
+    then
+        int points = "A".equals($tier) ? 0 : ("B".equals($tier) ? 2 : 5);
+        RiskPoints rp = new RiskPoints();
+        rp.setFactor("credit");
+        rp.setPoints(points);
+        insert(rp);
+end
+
+rule "Calculate Risk Points - Age"
+    salience 6000
+    when
+        $applicant : Applicant( $age : age )
+        not RiskPoints( factor == "age" )
+    then
+        int points = ($age <= 30) ? 0 : (($age <= 40) ? 1 : (($age <= 50) ? 3 : (($age <= 60) ? 5 : 8)));
+        RiskPoints rp = new RiskPoints();
+        rp.setFactor("age");
+        rp.setPoints(points);
+        insert(rp);
+end
+
+rule "Calculate Risk Points - Health"
+    salience 6000
+    when
+        $applicant : Applicant( $health : health )
+        not RiskPoints( factor == "health" )
+    then
+        int points = "excellent".equals($health) ? 0 : ("good".equals($health) ? 2 : 6);
+        RiskPoints rp = new RiskPoints();
+        rp.setFactor("health");
+        rp.setPoints(points);
+        insert(rp);
+end
+
+rule "Calculate Risk Points - Smoking"
+    salience 6000
+    when
+        $applicant : Applicant( $smoking : smoking )
+        not RiskPoints( factor == "smoking" )
+    then
+        int points = $smoking ? 5 : 0;
+        RiskPoints rp = new RiskPoints();
+        rp.setFactor("smoking");
+        rp.setPoints(points);
+        insert(rp);
+end
+
+// ============================================================================
+// PART 7: STAGE 4 - RISK CATEGORY ASSIGNMENT (Salience 5000-5999)
+// ============================================================================
+
+rule "Calculate Total Risk Points and Assign Category"
+    salience 5000
+    when
+        not RiskCategory()
+        accumulate(
+            RiskPoints( $p : points );
+            $total : sum($p)
+        )
+    then
+        int total = $total.intValue();
+        int category = (total <= 5) ? 1 : ((total <= 10) ? 2 : ((total <= 15) ? 3 : ((total <= 20) ? 4 : 5)));
+        RiskCategory rc = new RiskCategory();
+        rc.setCategory(category);
+        rc.setTotalPoints(total);
+        insert(rc);
+end
+
+// ============================================================================
+// PART 8: STAGE 5 - RISK-BASED DECISIONS (Salience 4000-4999)
+// ============================================================================
+
+rule "Risk Category 3+ Requires Manual Review"
+    salience 4000
+    when
+        RiskCategory( category >= 3 )
+        $decision : Decision()
+    then
+        $decision.setRequiresManualReview(true);
+        update($decision);
+end
+
+rule "Set Premium Multiplier by Risk Category"
+    salience 4000
+    when
+        RiskCategory( $cat : category )
+        $decision : Decision()
+    then
+        double multiplier = ($cat == 1) ? 1.0 : (($cat == 2) ? 1.3 : (($cat == 3) ? 1.7 : (($cat == 4) ? 2.2 : 2.5)));
+        $decision.setPremiumMultiplier(multiplier);
+        $decision.setRiskCategory($cat);
+        update($decision);
+end
+
+// ============================================================================
+// PART 9: FINAL DECISION RULES (Salience 1000-1999)
+// ============================================================================
+
+rule "Final Approval Check"
+    salience 1000
+    when
+        $decision : Decision( approved == true, requiresManualReview == false )
+    then
+        // All checks passed - automatic approval
+        System.out.println("Application APPROVED");
 end
 ```
 
-Guidelines:
-1. ALWAYS use 'declare' statements to define Applicant, Policy, and Decision types at the top of the DRL file
-2. Do NOT use import statements for model classes
-3. Create clear, specific rule names based on the extracted data
-4. Include an "Initialize Decision" rule that creates the Decision object if it doesn't exist
-5. Use appropriate conditions based on the extracted data
-6. Make rules executable and testable
-7. Add comments explaining complex logic
-8. Handle edge cases and validation
-9. Use proper getter/setter methods (e.g., setApproved(), getReasons().add("reason"))
-10. For rejection rules, use $decision.getReasons().add("reason text") to accumulate ALL rejection reasons
-11. NEVER use setReason() or setReasons() in rejection rules - always use getReasons().add() to preserve all reasons
-12. When comparing fields from different objects (e.g., Applicant.annualIncome vs Policy.coverageAmount), use variable binding: bind the field to a variable in one object pattern, then reference that variable in another object's constraint
-13. CORRECT multi-object syntax: `$applicant : Applicant( $income : annualIncome )  $policy : Policy( coverageAmount > ($income * 10) )`
-14. WRONG multi-object syntax: `$applicant : Applicant( annualIncome * 10 < coverageAmount )` - this will fail because coverageAmount is not on Applicant
+GUIDELINES FOR MULTI-LEVEL RULES:
+
+1. **ALWAYS use 'declare' statements** to define Applicant, Policy, Decision, and ALL intermediate types (CreditTier, RiskCategory, etc.)
+2. **Do NOT use import statements** for model classes
+3. **CRITICAL: Use setter-based initialization for declared types**, NOT constructors:
+   - CORRECT: `CreditTier ct = new CreditTier(); ct.setTier("A"); insert(ct);`
+   - WRONG: `insert(new CreditTier("A"));` (constructors don't work with declared types)
+4. **Use SALIENCE to control execution order**:
+   - 10000: Initialization
+   - 9000-9999: Establish classifications (CreditTier, AgeBracket)
+   - 8000-8999: Primary eligibility checks (age, credit minimum)
+   - 7000-7999: Compound condition checks (depend on CreditTier + Health)
+   - 6000-6999: Risk point calculation
+   - 5000-5999: Risk category assignment
+   - 4000-4999: Risk-based decisions
+   - 1000-1999: Final decisions
+5. **Create separate rules for EACH compound condition**:
+   - One rule for "Tier A + Excellent Health"
+   - One rule for "Tier A + Good Health"
+   - One rule for "Tier A + Fair Health"
+   - (repeat for Tier B and Tier C)
+6. **Use intermediate fact types** for classifications that are used in later rules
+7. **Always check "not <FactType>()" before inserting** to prevent duplicates
+8. **Use proper getter/setter methods**: setApproved(), getReasons().add("reason")
+9. **For rejection rules, use $decision.getReasons().add()** to accumulate ALL rejection reasons
+10. **NEVER use setReason() or setReasons()** in rejection rules - always use getReasons().add()
+11. **When comparing fields from different objects**, use variable binding:
+    - CORRECT: `$applicant : Applicant( $income : annualIncome )  $policy : Policy( coverageAmount > ($income * 10) )`
+    - WRONG: `$applicant : Applicant( annualIncome * 10 < coverageAmount )`
+12. **For point-based systems**, use setter-based initialization for RiskPoints:
+    - CORRECT: `RiskPoints rp = new RiskPoints(); rp.setFactor("credit"); rp.setPoints(points); insert(rp);`
+13. **Use 'not' checks** to ensure rules fire only once: `when not CreditTier() then ...`
+14. **Add comments** to mark each stage clearly
+15. **Handle special rejection rules** early (high salience) to short-circuit evaluation
+16. **Create clear, specific rule names** based on the extracted data (e.g., "Income Check - Tier A Excellent Health")
+17. **Make rules executable and testable** - ensure all syntax is valid Drools DRL
+18. **Add section comments** to organize rules by stage/purpose
+
+SPECIAL HANDLING FOR EXTRACTED DATA:
+
+If extracted data contains:
+- **dependency_stages**: Use this to determine salience ranges and intermediate fact types
+- **intermediate_facts**: Declare these as Drools types (e.g., CreditTier, RiskCategory)
+- **special_rejection_rules**: Generate high-salience rules for these compound rejections
+- **Matrix data** (e.g., "Tier A + Excellent Health" combinations): Generate one rule per cell
 
 Return your response with:
-1. Complete DRL rules in ```drl code blocks (including declare statements)
-2. Brief explanation of the rules
+1. Complete DRL rules in ```drl code blocks (including ALL declare statements for intermediate facts)
+2. Brief explanation of the rules organized by stage
+3. List of intermediate facts that later rules depend on
 
 DO NOT generate decision tables - only generate DRL rules."""),
             ("user", """Extracted policy data:

@@ -11,7 +11,7 @@ info:
     - Evaluate applications without knowing container details
     - Multi-tenant isolation with separate containers per bank+policy
     - Request tracking and analytics
-    - **NEW v2.1:** Extraction query transparency with confidence scores
+    - **NEW v2.2:** Pre-signed S3 URLs for secure document downloads
 
     **Architecture:**
     - Customer apps query by `bank_id` + `policy_type`
@@ -20,13 +20,19 @@ info:
     - Health checking ensures high availability
     - LLM-generated queries and Textract responses stored for audit trail
 
-    **What's New in v2.1:**
+    **What's New in v2.2:**
+    - Pre-signed S3 URLs for all documents (policy, JAR, DRL, Excel)
+    - Secure 24-hour expiring download links
+    - Frontend-ready URLs requiring no AWS authentication
+    - Both permanent S3 URLs and temporary pre-signed URLs provided
+
+    **What's in v2.1:**
     - Extraction queries with AWS Textract confidence scores stored in database
     - Optional inclusion of queries and rules in API responses
     - Complete transparency into rule extraction process
     - Query performance and quality monitoring via confidence scores
 
-  version: 2.1.0
+  version: 2.2.0
   contact:
     name: IBM Automation
     url: https://github.com/DecisionsDev
@@ -263,6 +269,14 @@ paths:
                       status: running
                       health_status: healthy
                       deployed_at: "2025-11-12T10:00:00"
+                      s3_policy_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/sample-policies/chase_insurance_policy.pdf"
+                      policy_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/sample-policies/chase_insurance_policy.pdf?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=0p80af2fjnczmsXdiDNZH011aRE%3D&Expires=1763167243"
+                      s3_jar_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.jar"
+                      jar_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.jar?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=oQRX4o%2BwG9w2BjYeToyaJJYecEU%3D&Expires=1763167243"
+                      s3_drl_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.drl"
+                      drl_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.drl?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=0p80af2fjnczmsXdiDNZH011aRE%3D&Expires=1763167243"
+                      s3_excel_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx"
+                      excel_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=lW3SDM5uUFwh5wTohnepXMVNNl0%3D&Expires=1763167243"
                 with-queries-and-rules:
                   summary: Response with extraction queries and rules
                   value:
@@ -275,6 +289,14 @@ paths:
                       status: running
                       health_status: healthy
                       deployed_at: "2025-11-12T10:00:00"
+                      s3_policy_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/sample-policies/chase_insurance_policy.pdf"
+                      policy_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/sample-policies/chase_insurance_policy.pdf?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=0p80af2fjnczmsXdiDNZH011aRE%3D&Expires=1763167243"
+                      s3_jar_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.jar"
+                      jar_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.jar?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=oQRX4o%2BwG9w2BjYeToyaJJYecEU%3D&Expires=1763167243"
+                      s3_drl_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.drl"
+                      drl_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.drl?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=0p80af2fjnczmsXdiDNZH011aRE%3D&Expires=1763167243"
+                      s3_excel_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx"
+                      excel_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=lW3SDM5uUFwh5wTohnepXMVNNl0%3D&Expires=1763167243"
                     extraction_queries_count: 20
                     extraction_queries:
                       - id: 1
@@ -1042,6 +1064,46 @@ components:
         deployed_at:
           type: string
           format: date-time
+        s3_policy_url:
+          type: string
+          format: uri
+          description: S3 URL of the original policy document
+          example: https://uw-data-extraction.s3.us-east-1.amazonaws.com/sample-policies/chase_insurance_policy.pdf
+        policy_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the policy document (expires in 24 hours)
+          example: https://uw-data-extraction.s3.amazonaws.com/sample-policies/chase_insurance_policy.pdf?AWSAccessKeyId=...&Signature=...&Expires=1763167243
+        s3_jar_url:
+          type: string
+          format: uri
+          description: S3 URL of the compiled JAR file
+          example: https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.jar
+        jar_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the JAR file (expires in 24 hours)
+          example: https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.jar?AWSAccessKeyId=...&Signature=...&Expires=1763167243
+        s3_drl_url:
+          type: string
+          format: uri
+          description: S3 URL of the DRL rules file
+          example: https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.drl
+        drl_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the DRL file (expires in 24 hours)
+          example: https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.drl?AWSAccessKeyId=...&Signature=...&Expires=1763167243
+        s3_excel_url:
+          type: string
+          format: uri
+          description: S3 URL of the Excel spreadsheet with rules
+          example: https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx
+        excel_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the Excel file (expires in 24 hours)
+          example: https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx?AWSAccessKeyId=...&Signature=...&Expires=1763167243
 
     DeploymentInfo:
       type: object
@@ -1069,12 +1131,38 @@ components:
         deployed_at:
           type: string
           format: date-time
+        s3_policy_url:
+          type: string
+          format: uri
+          description: S3 URL of the original policy document
+        policy_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the policy document (expires in 24 hours)
         s3_jar_url:
           type: string
+          format: uri
+          description: S3 URL of the compiled JAR file
+        jar_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the JAR file (expires in 24 hours)
         s3_drl_url:
           type: string
+          format: uri
+          description: S3 URL of the DRL rules file
+        drl_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the DRL file (expires in 24 hours)
         s3_excel_url:
           type: string
+          format: uri
+          description: S3 URL of the Excel spreadsheet with rules
+        excel_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the Excel file (expires in 24 hours)
 
     EvaluationResult:
       type: object
@@ -1104,6 +1192,8 @@ components:
       properties:
         s3_url:
           type: string
+          format: uri
+          description: S3 URL of the original policy document
         policy_type:
           type: string
         bank_id:
@@ -1113,12 +1203,34 @@ components:
         status:
           type: string
           enum: [in_progress, completed, failed]
+        policy_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the policy document (expires in 24 hours)
         jar_s3_url:
           type: string
+          format: uri
+          description: S3 URL of the compiled JAR file
+        jar_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the JAR file (expires in 24 hours)
         drl_s3_url:
           type: string
+          format: uri
+          description: S3 URL of the DRL rules file
+        drl_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the DRL file (expires in 24 hours)
         excel_s3_url:
           type: string
+          format: uri
+          description: S3 URL of the Excel spreadsheet with rules
+        excel_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the Excel file (expires in 24 hours)
         steps:
           type: object
 

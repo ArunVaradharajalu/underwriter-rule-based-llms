@@ -424,10 +424,30 @@ class S3Service:
                 "error": str(e)
             }
 
+    def generate_presigned_url_from_s3_url(self, s3_url: str, expiration: int = 3600) -> Optional[str]:
+        """
+        Generate a presigned URL from an S3 URL
+
+        :param s3_url: Full S3 URL (e.g., https://bucket.s3.region.amazonaws.com/path/file.pdf)
+        :param expiration: URL expiration time in seconds (default 1 hour)
+        :return: Presigned URL or None
+        """
+        if not s3_url:
+            return None
+
+        # Parse S3 URL to extract key
+        s3_info = self.parse_s3_url(s3_url)
+        if "error" in s3_info:
+            print(f"Error parsing S3 URL for presigned URL generation: {s3_info['error']}")
+            return None
+
+        s3_key = s3_info["key"]
+        return self.generate_presigned_url(s3_key, expiration)
+
     def _get_content_type(self, filename: str) -> str:
         """
         Determine content type based on file extension
-        
+
         :param filename: Filename with extension
         :return: MIME content type
         """

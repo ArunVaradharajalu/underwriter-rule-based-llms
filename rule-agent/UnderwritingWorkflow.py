@@ -20,6 +20,7 @@ from DroolsDeploymentService import DroolsDeploymentService
 from S3Service import S3Service
 from ExcelRulesExporter import ExcelRulesExporter
 from DatabaseService import get_database_service
+from DocumentExtractor import DocumentExtractor
 from PyPDF2 import PdfReader
 import json
 import os
@@ -31,7 +32,13 @@ import hashlib
 class UnderwritingWorkflow:
     """
     Orchestrates the complete underwriting workflow:
-    PDF → Analysis → Textract → Rule Generation → Deployment → Excel Export
+    Multi-format Document (PDF/Excel/Word) → Analysis → Textract → Rule Generation → Deployment → Excel Export
+
+    Supported document formats:
+    - PDF (.pdf) - via PyPDF2 and AWS Textract
+    - Excel (.xlsx, .xls) - via pandas/openpyxl
+    - Word (.docx) - via python-docx
+    - Text (.txt) - direct read
     """
 
     def __init__(self, llm):
@@ -43,10 +50,12 @@ class UnderwritingWorkflow:
         self.s3_service = S3Service()
         self.excel_exporter = ExcelRulesExporter()
         self.db_service = get_database_service()
+        self.document_extractor = DocumentExtractor()
 
-        # Validate Textract is configured (required)
+        # Validate Textract is configured (required for PDF query-based extraction)
         if not self.textract.isConfigured:
-            raise RuntimeError("AWS Textract is not configured. Please configure AWS credentials and Textract service.")
+            print("WARNING: AWS Textract is not configured. PDF query-based extraction will not be available.")
+            print("         Excel and Word documents will still work with text-based extraction.")
 
     def process_policy_document(self, s3_url: str,
                                 policy_type: str = "general",
@@ -104,19 +113,29 @@ class UnderwritingWorkflow:
             result["s3_bucket"] = s3_bucket
             result["s3_key"] = s3_key
 
-            # Step 1: Extract text from PDF
+            # Step 1: Extract text from document (auto-detect format: PDF, Excel, Word, Text)
             print("\n" + "="*60)
-            print("Step 1: Extracting text from PDF from S3...")
+            print("Step 1: Extracting text from document (auto-detecting format)...")
             print("="*60)
 
-            # Read PDF from S3 directly into memory
-            document_text = self._extract_text_from_s3(s3_key)
+            # Use new DocumentExtractor to handle multiple formats
+            extraction_result = self.document_extractor.extract_text_from_s3(s3_url)
+
+            if "error" in extraction_result:
+                result["status"] = "failed"
+                result["error"] = f"Text extraction failed: {extraction_result['error']}"
+                return result
+
+            document_text = extraction_result["text"]
+            document_format = extraction_result["format"]
 
             result["steps"]["text_extraction"] = {
                 "status": "success",
+                "format": document_format,
                 "length": len(document_text),
                 "preview": document_text[:500] + "..." if len(document_text) > 500 else document_text
             }
+            print(f"✓ Detected format: {document_format.upper()}")
             print(f"✓ Extracted {len(document_text)} characters")
 
             # Compute document hash for version tracking
@@ -306,6 +325,10 @@ class UnderwritingWorkflow:
                     if jar_upload["status"] == "success":
                         print(f"✓ JAR uploaded to S3: {jar_upload['s3_url']}")
                         result["jar_s3_url"] = jar_upload["s3_url"]
+                        # Generate pre-signed URL for JAR
+                        jar_presigned = self.s3_service.generate_presigned_url_from_s3_url(jar_upload["s3_url"], expiration=86400)  # 24 hours
+                        if jar_presigned:
+                            result["jar_presigned_url"] = jar_presigned
                     else:
                         print(f"✗ JAR upload failed: {jar_upload.get('message', 'Unknown error')}")
 
@@ -328,6 +351,10 @@ class UnderwritingWorkflow:
                     if drl_upload["status"] == "success":
                         print(f"✓ DRL uploaded to S3: {drl_upload['s3_url']}")
                         result["drl_s3_url"] = drl_upload["s3_url"]
+                        # Generate pre-signed URL for DRL
+                        drl_presigned = self.s3_service.generate_presigned_url_from_s3_url(drl_upload["s3_url"], expiration=86400)  # 24 hours
+                        if drl_presigned:
+                            result["drl_presigned_url"] = drl_presigned
                     else:
                         print(f"✗ DRL upload failed: {drl_upload.get('message', 'Unknown error')}")
 
@@ -357,6 +384,10 @@ class UnderwritingWorkflow:
                         if excel_upload["status"] == "success":
                             print(f"✓ Excel spreadsheet uploaded to S3: {excel_upload['s3_url']}")
                             result["excel_s3_url"] = excel_upload["s3_url"]
+                            # Generate pre-signed URL for Excel
+                            excel_presigned = self.s3_service.generate_presigned_url_from_s3_url(excel_upload["s3_url"], expiration=86400)  # 24 hours
+                            if excel_presigned:
+                                result["excel_presigned_url"] = excel_presigned
                         else:
                             print(f"✗ Excel upload failed: {excel_upload.get('message', 'Unknown error')}")
 
@@ -375,6 +406,13 @@ class UnderwritingWorkflow:
                         }
 
                 result["steps"]["s3_upload"] = s3_upload_results
+
+                # Generate pre-signed URL for the original policy document
+                if s3_url:
+                    policy_presigned = self.s3_service.generate_presigned_url_from_s3_url(s3_url, expiration=86400)  # 24 hours
+                    if policy_presigned:
+                        result["policy_presigned_url"] = policy_presigned
+                        print(f"✓ Generated pre-signed URL for policy document")
 
                 # Update database with S3 URLs
                 try:
