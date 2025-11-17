@@ -607,6 +607,46 @@ class DatabaseService:
                 return True
             return False
 
+    def update_container_version(self, container_id: str, version: int) -> Optional[RuleContainer]:
+        """Update container version number"""
+        with self.get_session() as session:
+            container = session.query(RuleContainer).filter_by(container_id=container_id).first()
+            if container:
+                container.version = version
+                container.updated_at = datetime.utcnow()
+                session.commit()
+                session.refresh(container)
+                logger.info(f"Updated container {container_id} version to {version}")
+            return container
+
+    def log_deployment_history(self, container_id: str, bank_id: str, policy_type_id: str,
+                              action: str, version: int, changes_description: str = None,
+                              deployed_by: str = None) -> Optional[ContainerDeploymentHistory]:
+        """Log deployment history entry"""
+        with self.get_session() as session:
+            container = session.query(RuleContainer).filter_by(container_id=container_id).first()
+            if not container:
+                logger.warning(f"Container {container_id} not found for history logging")
+                return None
+            
+            history = ContainerDeploymentHistory(
+                container_id=container.id,
+                bank_id=bank_id,
+                policy_type_id=policy_type_id,
+                action=action,
+                version=version,
+                platform=container.platform,
+                endpoint=container.endpoint,
+                document_hash=container.document_hash,
+                changes_description=changes_description,
+                deployed_by=deployed_by or "system"
+            )
+            session.add(history)
+            session.commit()
+            session.refresh(history)
+            logger.info(f"Logged {action} action for container {container_id}")
+            return history
+
     # Request tracking
     def log_request(self, request_data: Dict[str, Any]) -> RuleRequest:
         """Log a rule request for analytics"""
@@ -1005,6 +1045,136 @@ class DatabaseService:
                         rules_by_id[rule.parent_id]['dependencies'].append(rule_dict)
 
             return root_rules
+
+    def update_hierarchical_rules(self, bank_id: str, policy_type_id: str, 
+                                  updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Update hierarchical rules fields (expected, actual, confidence, passed, etc.)
+        
+        Supports updating by either:
+        - rule_id: Dot notation identifier (e.g., "1.1", "1.2.3")
+        - id: Database ID
+        
+        Args:
+            bank_id: Bank identifier
+            policy_type_id: Policy type identifier
+            updates: List of update objects, each containing:
+                - rule_id OR id: Rule identifier
+                - expected: (optional) Expected value/condition
+                - actual: (optional) Actual value/result
+                - confidence: (optional) Confidence score (0.0-1.0)
+                - passed: (optional) Pass/fail status (boolean)
+                - description: (optional) Rule description
+                - name: (optional) Rule name
+        
+        Returns:
+            Dictionary with:
+                - updated_count: Number of rules updated
+                - updated_ids: List of database IDs that were updated
+                - errors: List of errors if any rules failed to update
+        
+        Example:
+            updates = [
+                {
+                    "rule_id": "1.1",
+                    "expected": "Age >= 18",
+                    "actual": "Age = 25",
+                    "confidence": 0.95,
+                    "passed": True
+                },
+                {
+                    "id": 42,  # or use database ID directly
+                    "expected": "Credit Score >= 600",
+                    "confidence": 0.88
+                }
+            ]
+        """
+        with self.get_session() as session:
+            updated_ids = []
+            errors = []
+            
+            for update_data in updates:
+                try:
+                    # Find the rule by either rule_id or database id
+                    rule = None
+                    
+                    if 'id' in update_data:
+                        # Update by database ID
+                        rule = session.query(HierarchicalRule).filter_by(
+                            id=update_data['id'],
+                            bank_id=bank_id,
+                            policy_type_id=policy_type_id
+                        ).first()
+                        identifier = f"id={update_data['id']}"
+                    elif 'rule_id' in update_data:
+                        # Update by dot notation rule_id
+                        rule = session.query(HierarchicalRule).filter_by(
+                            rule_id=update_data['rule_id'],
+                            bank_id=bank_id,
+                            policy_type_id=policy_type_id
+                        ).first()
+                        identifier = f"rule_id={update_data['rule_id']}"
+                    else:
+                        errors.append({
+                            "error": "Missing identifier",
+                            "message": "Each update must have either 'id' or 'rule_id'"
+                        })
+                        continue
+                    
+                    if not rule:
+                        errors.append({
+                            "error": "Rule not found",
+                            "identifier": identifier,
+                            "bank_id": bank_id,
+                            "policy_type_id": policy_type_id
+                        })
+                        continue
+                    
+                    # Update fields if provided
+                    updated = False
+                    if 'expected' in update_data:
+                        rule.expected = update_data['expected']
+                        updated = True
+                    if 'actual' in update_data:
+                        rule.actual = update_data['actual']
+                        updated = True
+                    if 'confidence' in update_data:
+                        rule.confidence = float(update_data['confidence'])
+                        updated = True
+                    if 'passed' in update_data:
+                        rule.passed = bool(update_data['passed'])
+                        updated = True
+                    if 'description' in update_data:
+                        rule.description = update_data['description']
+                        updated = True
+                    if 'name' in update_data:
+                        rule.name = update_data['name']
+                        updated = True
+                    
+                    if updated:
+                        # updated_at will be automatically updated by SQLAlchemy
+                        session.flush()
+                        updated_ids.append(rule.id)
+                        logger.info(f"Updated hierarchical rule {identifier} for {bank_id}/{policy_type_id}")
+                    
+                except Exception as e:
+                    errors.append({
+                        "error": str(e),
+                        "update_data": update_data
+                    })
+            
+            # Commit all updates
+            if updated_ids:
+                session.commit()
+            
+            result = {
+                "updated_count": len(updated_ids),
+                "updated_ids": updated_ids,
+                "errors": errors
+            }
+            
+            logger.info(f"Updated {len(updated_ids)} hierarchical rules for {bank_id}/{policy_type_id}")
+            return result
 
     def delete_hierarchical_rules(self, bank_id: str, policy_type_id: str) -> int:
         """

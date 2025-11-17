@@ -20,7 +20,26 @@ info:
     - Health checking ensures high availability
     - LLM-generated queries and Textract responses stored for audit trail
 
-    **What's New in v2.3:**
+    **What's New in v2.6:**
+    - Enhanced `/api/v1/policies/update-hierarchical-rules` with optional DRL update
+    - Set `update_drl: true` to regenerate and redeploy DRL rules from hierarchical rules
+    - Makes hierarchical rules the source of truth for rule logic
+    - Automatically converts updated expected values to executable DRL
+    - Version management and deployment history logging included
+    
+    **What's in v2.5:**
+    - Endpoint `/api/v1/policies/update-hierarchical-rules` for updating validation fields
+    - Update expected/actual values, confidence scores, pass/fail status
+    - Batch updates with partial field support
+    - Update by rule_id (dot notation) or database ID
+
+    **What's in v2.4:**
+    - New endpoint `/api/v1/policies/update-rules` for updating rules without reprocessing documents
+    - Version management with automatic version incrementing
+    - Deployment history logging for audit trails
+    - Support for quick rule updates and fixes
+
+    **What's in v2.3:**
     - Hierarchical rules with parent-child dependencies
     - Tree-structured rule organization with unlimited nesting depth
     - Rule validation with pass/fail status and confidence scores
@@ -39,7 +58,7 @@ info:
     - Complete transparency into rule extraction process
     - Query performance and quality monitoring via confidence scores
 
-  version: 2.3.0
+  version: 2.6.0
   contact:
     name: IBM Automation
     url: https://github.com/DecisionsDev
@@ -376,6 +395,577 @@ paths:
                         updated_at: "2025-11-12T09:00:00"
         '404':
           description: No active container found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/policies/update-rules:
+    post:
+      tags:
+        - Customer API
+      summary: Update policy rules and redeploy
+      description: |
+        **Update deployed rules for an existing policy without reprocessing the entire document.**
+
+        This endpoint allows you to:
+        - Update rules for an existing bank+policy combination
+        - Parse and save new DRL rules to the database
+        - Redeploy rules to Drools KIE Server (increments version)
+        - Upload new artifacts (JAR, DRL) to S3
+        - Log deployment history for audit trail
+
+        **Use Case:**
+        After initial policy processing via `/process_policy_from_s3`, you can use this endpoint
+        to update rules without reanalyzing the source document. This is useful for:
+        - Tweaking existing rules
+        - Adding new rules
+        - Fixing rule logic errors
+        - Rolling out rule updates quickly
+
+        **Prerequisites:**
+        - An active container must exist for the bank+policy (created via `/process_policy_from_s3`)
+        - DRL content must be valid Drools syntax
+
+        **Version Management:**
+        Each update increments the container version number automatically.
+      operationId: updatePolicyRules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - bank_id
+                - policy_type
+                - drl_content
+              properties:
+                bank_id:
+                  type: string
+                  description: Bank identifier
+                  example: chase
+                policy_type:
+                  type: string
+                  description: Policy type identifier
+                  example: insurance
+                drl_content:
+                  type: string
+                  description: |
+                    Complete DRL (Drools Rule Language) content with updated rules.
+                    Must include package declaration and valid rule syntax.
+                  example: |
+                    package com.underwriting;
+                    
+                    rule "Minimum Age Requirement"
+                    when
+                        $applicant : Applicant(age < 18)
+                        $decision : Decision()
+                    then
+                        $decision.setApproved(false);
+                        $decision.addRejectionReason("Applicant must be at least 18 years old");
+                    end
+                    
+                    rule "Maximum Age Limit"
+                    when
+                        $applicant : Applicant(age > 65)
+                        $decision : Decision()
+                    then
+                        $decision.setApproved(false);
+                        $decision.addRejectionReason("Applicant must be 65 years or younger");
+                    end
+            examples:
+              update-insurance-rules:
+                summary: Update Insurance Rules
+                value:
+                  bank_id: chase
+                  policy_type: insurance
+                  drl_content: |
+                    package com.underwriting;
+                    
+                    rule "Age Requirement"
+                    when
+                        $applicant : Applicant(age < 18 || age > 65)
+                        $decision : Decision()
+                    then
+                        $decision.setApproved(false);
+                        $decision.addRejectionReason("Age must be between 18 and 65");
+                    end
+                    
+                    rule "Minimum Credit Score"
+                    when
+                        $applicant : Applicant(creditScore < 600)
+                        $decision : Decision()
+                    then
+                        $decision.setApproved(false);
+                        $decision.addRejectionReason("Minimum credit score of 600 required");
+                    end
+      responses:
+        '200':
+          description: Rules updated and redeployed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: completed
+                  bank_id:
+                    type: string
+                    example: chase
+                  policy_type:
+                    type: string
+                    example: insurance
+                  container_id:
+                    type: string
+                    example: chase-insurance-underwriting-rules
+                  new_version:
+                    type: integer
+                    description: New container version after update
+                    example: 2
+                  steps:
+                    type: object
+                    description: Details of each step in the update process
+                    properties:
+                      update_database_rules:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            example: success
+                          count:
+                            type: integer
+                            example: 5
+                          rule_ids:
+                            type: array
+                            items:
+                              type: integer
+                            example: [101, 102, 103, 104, 105]
+                      redeployment:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            example: success
+                          container_id:
+                            type: string
+                            example: chase-insurance-underwriting-rules
+                          release_id:
+                            type: object
+                            properties:
+                              group-id:
+                                type: string
+                                example: com.underwriting
+                              artifact-id:
+                                type: string
+                                example: underwriting-rules
+                              version:
+                                type: string
+                                example: "20251115.143022"
+                      update_container:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            example: success
+                          new_version:
+                            type: integer
+                            example: 2
+                      s3_upload:
+                        type: object
+                        properties:
+                          jar:
+                            type: object
+                            properties:
+                              status:
+                                type: string
+                                example: success
+                              s3_url:
+                                type: string
+                                example: "s3://uw-data-extraction/generated-rules/chase-insurance/20251115.143022/chase-insurance_20251115_143022.jar"
+                          drl:
+                            type: object
+                            properties:
+                              status:
+                                type: string
+                                example: success
+                              s3_url:
+                                type: string
+                                example: "s3://uw-data-extraction/generated-rules/chase-insurance/20251115.143022/chase-insurance_20251115_143022.drl"
+              example:
+                status: completed
+                bank_id: chase
+                policy_type: insurance
+                container_id: chase-insurance-underwriting-rules
+                new_version: 2
+                steps:
+                  update_database_rules:
+                    status: success
+                    count: 5
+                    rule_ids: [101, 102, 103, 104, 105]
+                  redeployment:
+                    status: success
+                    container_id: chase-insurance-underwriting-rules
+                    release_id:
+                      group-id: com.underwriting
+                      artifact-id: underwriting-rules
+                      version: "20251115.143022"
+                    message: "Rules deployed to dedicated container drools-chase-insurance-underwriting-rules"
+                  update_container:
+                    status: success
+                    new_version: 2
+                  s3_upload:
+                    jar:
+                      status: success
+                      s3_url: "s3://uw-data-extraction/generated-rules/chase-insurance/20251115.143022/chase-insurance_20251115_143022.jar"
+                    drl:
+                      status: success
+                      s3_url: "s3://uw-data-extraction/generated-rules/chase-insurance/20251115.143022/chase-insurance_20251115_143022.drl"
+        '400':
+          description: Bad request - missing required fields or invalid DRL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: error
+                message: "drl_content is required. Provide the updated Drools rules."
+        '404':
+          description: No active container found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                status: error
+                message: "No active container found for bank 'chase' and policy type 'insurance'. Please deploy rules first using /process_policy_from_s3"
+        '500':
+          description: Server error during update/redeployment
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: failed
+                  error:
+                    type: string
+                    example: "Maven build failed"
+                  steps:
+                    type: object
+                    description: Details of completed and failed steps
+
+  /api/v1/policies/update-hierarchical-rules:
+    post:
+      tags:
+        - Customer API
+      summary: Update hierarchical rules validation fields (and optionally DRL logic)
+      description: |
+        **Update fields in hierarchical rules without regenerating the entire rule tree.**
+
+        This endpoint allows you to update validation-related fields in hierarchical rules:
+        - **expected**: Expected value or condition
+        - **actual**: Actual value or result from evaluation
+        - **confidence**: Confidence score (0.0-1.0)
+        - **passed**: Pass/fail status (boolean)
+        - **description**: Rule description
+        - **name**: Rule name
+
+        **NEW: Optional DRL Update (v2.6)**
+        Set `update_drl: true` to also regenerate and redeploy DRL rules based on updated
+        expected values. This makes hierarchical rules the **source of truth** for rule logic:
+        - Updates hierarchical rules in database
+        - Converts hierarchical rules back to executable DRL
+        - Redeploys to Drools KIE Server
+        - Increments container version
+        - Uploads new artifacts to S3
+        - Logs deployment history
+
+        **Use Cases:**
+        - Set expected values after initial rule creation
+        - Record actual values from policy evaluations
+        - Update confidence scores based on validation results
+        - Mark rules as passed/failed
+        - Fix or clarify rule descriptions
+        - **NEW:** Update rule logic by changing expected values (with `update_drl: true`)
+
+        **Features:**
+        - Batch updates (multiple rules in one request)
+        - Partial updates (only update fields you provide)
+        - Update by rule_id (dot notation) or database ID
+        - Atomic updates with error handling
+        - **NEW:** Optional DRL regeneration and redeployment
+
+        **Prerequisites:**
+        - Hierarchical rules must exist for the bank+policy combination
+        - Created via `/process_policy_from_s3` endpoint
+        - If using `update_drl: true`, an active container must exist
+      operationId: updateHierarchicalRules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - bank_id
+                - policy_type
+                - updates
+              properties:
+                bank_id:
+                  type: string
+                  description: Bank identifier
+                  example: chase
+                policy_type:
+                  type: string
+                  description: Policy type identifier
+                  example: insurance
+                update_drl:
+                  type: boolean
+                  description: |
+                    **NEW in v2.6:** Optional flag to also regenerate and redeploy DRL rules.
+                    When true, converts updated hierarchical rules back to DRL and redeploys.
+                    This makes hierarchical rules the source of truth for rule logic.
+                  default: false
+                  example: true
+                updates:
+                  type: array
+                  description: Array of rule updates
+                  minItems: 1
+                  items:
+                    type: object
+                    properties:
+                      rule_id:
+                        type: string
+                        description: Dot notation rule identifier (e.g., "1.1", "1.2.3"). Use this OR id.
+                        example: "1.1"
+                      id:
+                        type: integer
+                        description: Database ID of the rule. Use this OR rule_id.
+                        example: 42
+                      expected:
+                        type: string
+                        description: Expected value or condition
+                        example: "Age >= 18"
+                      actual:
+                        type: string
+                        description: Actual value or result
+                        example: "Age = 25"
+                      confidence:
+                        type: number
+                        format: float
+                        minimum: 0.0
+                        maximum: 1.0
+                        description: Confidence score
+                        example: 0.95
+                      passed:
+                        type: boolean
+                        description: Whether the rule passed validation
+                        example: true
+                      description:
+                        type: string
+                        description: Rule description
+                        example: "Verify applicant meets minimum age requirement"
+                      name:
+                        type: string
+                        description: Rule name
+                        example: "Age Requirement Check"
+                    oneOf:
+                      - required: [rule_id]
+                      - required: [id]
+            examples:
+              update-by-rule-id:
+                summary: Update rules by dot notation ID (metadata only)
+                value:
+                  bank_id: chase
+                  policy_type: insurance
+                  update_drl: false
+                  updates:
+                    - rule_id: "1.1"
+                      expected: "Age >= 18"
+                      actual: "Age = 25"
+                      confidence: 0.95
+                      passed: true
+                    - rule_id: "1.2"
+                      expected: "Credit Score >= 600"
+                      actual: "Credit Score = 720"
+                      confidence: 0.98
+                      passed: true
+              update-with-drl-regeneration:
+                summary: Update expected values and redeploy DRL (NEW v2.6)
+                value:
+                  bank_id: chase
+                  policy_type: insurance
+                  update_drl: true
+                  updates:
+                    - rule_id: "1.2"
+                      name: "Credit Score Check"
+                      expected: "Credit Score >= 650"
+                      description: "Increased minimum credit score requirement"
+              update-by-database-id:
+                summary: Update rules by database ID
+                value:
+                  bank_id: chase
+                  policy_type: insurance
+                  updates:
+                    - id: 42
+                      expected: "Income >= $50,000"
+                      confidence: 0.88
+                    - id: 43
+                      passed: false
+                      actual: "Income = $45,000"
+              partial-update:
+                summary: Partial update (only some fields)
+                value:
+                  bank_id: chase
+                  policy_type: insurance
+                  updates:
+                    - rule_id: "2.1"
+                      confidence: 0.92
+                    - rule_id: "2.2"
+                      description: "Updated description for clarity"
+      responses:
+        '200':
+          description: Rules updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [success, no_updates, partial]
+                    example: success
+                  bank_id:
+                    type: string
+                    example: chase
+                  policy_type:
+                    type: string
+                    example: insurance
+                  updated_count:
+                    type: integer
+                    description: Number of rules successfully updated
+                    example: 3
+                  updated_ids:
+                    type: array
+                    description: Database IDs of updated rules
+                    items:
+                      type: integer
+                    example: [42, 43, 44]
+                  new_version:
+                    type: integer
+                    description: New container version (only if update_drl was true)
+                    example: 2
+                  drl_update:
+                    type: object
+                    description: DRL regeneration and redeployment result (only if update_drl was true)
+                    properties:
+                      status:
+                        type: string
+                        example: success
+                      container_id:
+                        type: string
+                        example: chase-insurance-underwriting-rules
+                      release_id:
+                        type: object
+                        properties:
+                          group-id:
+                            type: string
+                          artifact-id:
+                            type: string
+                          version:
+                            type: string
+                      s3_upload:
+                        type: object
+                        properties:
+                          jar:
+                            type: object
+                          drl:
+                            type: object
+                  errors:
+                    type: array
+                    description: Errors for rules that failed to update (only if partial success)
+                    items:
+                      type: object
+                      properties:
+                        error:
+                          type: string
+                        identifier:
+                          type: string
+                        message:
+                          type: string
+              examples:
+                success:
+                  summary: All updates successful
+                  value:
+                    status: success
+                    bank_id: chase
+                    policy_type: insurance
+                    updated_count: 3
+                    updated_ids: [42, 43, 44]
+                partial-success:
+                  summary: Some updates failed
+                  value:
+                    status: partial
+                    bank_id: chase
+                    policy_type: insurance
+                    updated_count: 2
+                    updated_ids: [42, 43]
+                    error_count: 1
+                    message: "Updated 2 rules, but 1 failed."
+                    errors:
+                      - error: "Rule not found"
+                        identifier: "rule_id=1.5"
+                        bank_id: "chase"
+                        policy_type_id: "insurance"
+        '207':
+          description: Multi-Status - Some updates succeeded, some failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: partial
+                  message:
+                    type: string
+                    example: "Updated 2 rules, but 1 failed."
+                  updated_count:
+                    type: integer
+                    example: 2
+                  error_count:
+                    type: integer
+                    example: 1
+                  errors:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          description: Bad request - invalid input or all updates failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missing-identifier:
+                  summary: Missing rule identifier
+                  value:
+                    error: "updates array is required"
+                all-failed:
+                  summary: All updates failed
+                  value:
+                    status: failed
+                    message: "All updates failed. See errors for details."
+                    updated_count: 0
+                    error_count: 3
+                    errors:
+                      - error: "Rule not found"
+                        identifier: "rule_id=99.99"
+        '500':
+          description: Server error
           content:
             application/json:
               schema:

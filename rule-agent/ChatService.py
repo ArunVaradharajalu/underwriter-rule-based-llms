@@ -754,6 +754,505 @@ def query_policies():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route(ROUTE + '/api/v1/policies/update-rules', methods=['POST', 'OPTIONS'])
+def update_policy_rules():
+    """
+    Update a policy with new DRL rules and redeploy
+    
+    This endpoint allows updating rules for an existing policy without reprocessing the entire document.
+    It will:
+    1. Parse and save the new rules to the database
+    2. Redeploy the rules to Drools KIE Server
+    3. Increment the container version
+    4. Update S3 URLs for new artifacts
+    5. Log deployment history for audit
+    
+    Request body:
+    {
+        "bank_id": "chase",
+        "policy_type": "insurance",
+        "drl_content": "package com.underwriting; rule \"New Rule\" when ... then ... end"
+    }
+    """
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'JSON body is required'}), 400
+        
+        # Validate required fields
+        if 'bank_id' not in data:
+            return jsonify({'error': 'bank_id is required'}), 400
+        
+        if 'policy_type' not in data:
+            return jsonify({'error': 'policy_type is required'}), 400
+        
+        if 'drl_content' not in data:
+            return jsonify({'error': 'drl_content is required. Provide the updated Drools rules.'}), 400
+        
+        bank_id = data['bank_id']
+        policy_type = data['policy_type']
+        drl_content = data['drl_content']
+        
+        # Normalize IDs (same as process_policy_from_s3)
+        normalized_bank = bank_id.lower().strip().replace(' ', '-')
+        normalized_type = policy_type.lower().strip().replace(' ', '-')
+        container_id = f"{normalized_bank}-{normalized_type}-underwriting-rules"
+        
+        print(f"\n{'='*60}")
+        print(f"Update Rules Request for: {container_id}")
+        print(f"{'='*60}")
+        
+        # Get existing container
+        container = db_service.get_active_container(normalized_bank, normalized_type)
+        if not container:
+            return jsonify({
+                "status": "error",
+                "message": f"No active container found for bank '{bank_id}' and policy type '{policy_type}'. Please deploy rules first using /process_policy_from_s3"
+            }), 404
+        
+        result = {
+            "bank_id": normalized_bank,
+            "policy_type": normalized_type,
+            "container_id": container_id,
+            "steps": {},
+            "status": "in_progress"
+        }
+        
+        # Step 1: Parse and save rules to database
+        try:
+            print("\n" + "="*60)
+            print("Step 1: Parsing and saving rules to database...")
+            print("="*60)
+            
+            # Parse DRL content to extract actual rules
+            rules_for_db = underwritingWorkflow._parse_drl_rules(drl_content)
+            
+            if rules_for_db:
+                # Get current document info from container
+                source_document = container.get('s3_policy_url', '')
+                document_hash = container.get('document_hash', '')
+                
+                # Save to database (this will deactivate old rules)
+                saved_ids = db_service.save_extracted_rules(
+                    bank_id=normalized_bank,
+                    policy_type_id=normalized_type,
+                    rules=rules_for_db,
+                    source_document=source_document,
+                    document_hash=document_hash
+                )
+                
+                print(f"✓ Updated {len(saved_ids)} rules in database")
+                result["steps"]["update_database_rules"] = {
+                    "status": "success",
+                    "count": len(saved_ids),
+                    "rule_ids": saved_ids
+                }
+            else:
+                print("⚠ No parseable rules found in DRL content")
+                result["steps"]["update_database_rules"] = {
+                    "status": "warning",
+                    "message": "No parseable rules found in DRL content"
+                }
+        except Exception as e:
+            print(f"⚠ Failed to parse/save rules to database: {e}")
+            result["steps"]["update_database_rules"] = {
+                "status": "error",
+                "message": str(e)
+            }
+        
+        # Step 2: Redeploy rules to Drools KIE Server
+        try:
+            print("\n" + "="*60)
+            print("Step 2: Redeploying rules to Drools KIE Server...")
+            print("="*60)
+            
+            # Deploy new rules using existing deployment infrastructure
+            deployment_result = underwritingWorkflow.drools_deployment.deploy_rules_automatically(
+                drl_content=drl_content,
+                container_id=container_id
+            )
+            
+            result["steps"]["redeployment"] = deployment_result
+            
+            if deployment_result["status"] == "success":
+                print(f"✓ Rules redeployed successfully")
+                
+                # Step 3: Update container version and metadata in database
+                try:
+                    print("\n" + "="*60)
+                    print("Step 3: Updating container version in database...")
+                    print("="*60)
+                    
+                    # Increment version
+                    current_version = container.get('version', 1)
+                    new_version = current_version + 1
+                    
+                    # Update container version
+                    db_service.update_container_version(
+                        container_id=container_id,
+                        version=new_version
+                    )
+                    
+                    print(f"✓ Container version updated from {current_version} to {new_version}")
+                    result["new_version"] = new_version
+                    
+                    # Step 4: Upload new artifacts to S3 if deployment was successful
+                    if "steps" in deployment_result:
+                        build_step = deployment_result["steps"].get("build", {})
+                        if build_step.get("status") == "success":
+                            print("\n" + "="*60)
+                            print("Step 4: Uploading new artifacts to S3...")
+                            print("="*60)
+                            
+                            jar_path = build_step.get("jar_path")
+                            drl_path = deployment_result["steps"].get("save_drl", {}).get("path")
+                            version_str = deployment_result["release_id"]["version"]
+                            
+                            s3_upload_results = {}
+                            
+                            # Upload JAR file
+                            if jar_path and os.path.exists(jar_path):
+                                jar_upload = s3Service.upload_jar_to_s3(jar_path, container_id, version_str)
+                                if jar_upload["status"] == "success":
+                                    db_service.update_container_urls(
+                                        container_id,
+                                        s3_jar_url=jar_upload["s3_url"]
+                                    )
+                                    s3_upload_results["jar"] = jar_upload
+                                    print(f"✓ JAR uploaded to S3: {jar_upload['s3_url']}")
+                                    
+                                    # Clean up temp JAR file
+                                    try:
+                                        os.unlink(jar_path)
+                                        print(f"✓ Temporary JAR file deleted")
+                                    except Exception as e:
+                                        print(f"Warning: Could not delete temp JAR file: {e}")
+                            
+                            # Upload DRL file
+                            if drl_path and os.path.exists(drl_path):
+                                drl_upload = s3Service.upload_drl_to_s3(drl_path, container_id, version_str)
+                                if drl_upload["status"] == "success":
+                                    db_service.update_container_urls(
+                                        container_id,
+                                        s3_drl_url=drl_upload["s3_url"]
+                                    )
+                                    s3_upload_results["drl"] = drl_upload
+                                    print(f"✓ DRL uploaded to S3: {drl_upload['s3_url']}")
+                                    
+                                    # Clean up temp DRL file
+                                    try:
+                                        os.unlink(drl_path)
+                                        print(f"✓ Temporary DRL file deleted")
+                                    except Exception as e:
+                                        print(f"Warning: Could not delete temp DRL file: {e}")
+                            
+                            result["steps"]["s3_upload"] = s3_upload_results
+                    
+                    # Step 5: Log deployment history for audit trail
+                    db_service.log_deployment_history(
+                        container_id=container_id,
+                        bank_id=normalized_bank,
+                        policy_type_id=normalized_type,
+                        action="updated",
+                        version=new_version,
+                        changes_description="Rules updated via /api/v1/policies/update-rules endpoint"
+                    )
+                    
+                    print(f"✓ Deployment history logged")
+                    result["steps"]["update_container"] = {
+                        "status": "success",
+                        "new_version": new_version
+                    }
+                    
+                except Exception as e:
+                    print(f"⚠ Failed to update container metadata: {e}")
+                    result["steps"]["update_container"] = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+                    # Don't fail the whole request if metadata update fails
+            else:
+                print(f"✗ Redeployment failed: {deployment_result.get('message', 'Unknown error')}")
+                result["status"] = "partial"
+                result["error"] = deployment_result.get('message', 'Redeployment failed')
+                return jsonify(result), 500
+                
+        except Exception as e:
+            print(f"✗ Error redeploying rules: {e}")
+            import traceback
+            traceback.print_exc()
+            result["steps"]["redeployment"] = {
+                "status": "error",
+                "message": str(e)
+            }
+            result["status"] = "failed"
+            result["error"] = str(e)
+            return jsonify(result), 500
+        
+        result["status"] = "completed"
+        print("\n" + "="*60)
+        print("✓ Rules update completed successfully!")
+        print("="*60)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"✗ Error in update_policy_rules: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
+@app.route(ROUTE + '/api/v1/policies/update-hierarchical-rules', methods=['POST', 'OPTIONS'])
+def update_hierarchical_rules():
+    """
+    Update hierarchical rules fields (expected, actual, confidence, passed, etc.)
+    
+    This endpoint allows you to update validation fields in hierarchical rules without
+    regenerating the entire rule tree. Useful for:
+    - Setting expected values after rule creation
+    - Recording actual values from evaluations
+    - Updating confidence scores
+    - Setting pass/fail status
+    - Modifying descriptions or names
+    
+    Supports batch updates and partial field updates.
+    
+    **NEW: Optional DRL Update**
+    Set "update_drl": true to also regenerate and redeploy DRL rules based on updated
+    expected values. This makes hierarchical rules the source of truth for rule logic.
+    
+    Request body:
+    {
+        "bank_id": "chase",
+        "policy_type": "insurance",
+        "update_drl": false,  // Optional: set to true to also update DRL rules
+        "updates": [
+            {
+                "rule_id": "1.1",  // or "id": 42 for database ID
+                "expected": "Age >= 18",
+                "actual": "Age = 25",
+                "confidence": 0.95,
+                "passed": true
+            }
+        ]
+    }
+    """
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'JSON body is required'}), 400
+        
+        # Validate required fields
+        if 'bank_id' not in data:
+            return jsonify({'error': 'bank_id is required'}), 400
+        
+        if 'policy_type' not in data:
+            return jsonify({'error': 'policy_type is required'}), 400
+        
+        if 'updates' not in data or not isinstance(data['updates'], list):
+            return jsonify({'error': 'updates array is required'}), 400
+        
+        if len(data['updates']) == 0:
+            return jsonify({'error': 'updates array cannot be empty'}), 400
+        
+        bank_id = data['bank_id']
+        policy_type = data['policy_type']
+        updates = data['updates']
+        update_drl = data.get('update_drl', False)  # Optional: also update DRL rules
+        
+        # Normalize IDs (same as other endpoints)
+        normalized_bank = bank_id.lower().strip().replace(' ', '-')
+        normalized_type = policy_type.lower().strip().replace(' ', '-')
+        container_id = f"{normalized_bank}-{normalized_type}-underwriting-rules"
+        
+        print(f"\n{'='*60}")
+        print(f"Update Hierarchical Rules Request")
+        print(f"Bank: {normalized_bank}, Policy: {normalized_type}")
+        print(f"Updates: {len(updates)} rules")
+        print(f"Update DRL: {update_drl}")
+        print(f"{'='*60}")
+        
+        # Verify container exists (optional check, but good for validation)
+        container = db_service.get_active_container(normalized_bank, normalized_type)
+        if not container and update_drl:
+            return jsonify({
+                "status": "error",
+                "message": f"No active container found for bank '{bank_id}' and policy type '{policy_type}'. Cannot update DRL without container."
+            }), 404
+        
+        # Update hierarchical rules in database
+        result = db_service.update_hierarchical_rules(
+            bank_id=normalized_bank,
+            policy_type_id=normalized_type,
+            updates=updates
+        )
+        
+        # Build response
+        response = {
+            "status": "success" if result['updated_count'] > 0 else "no_updates",
+            "bank_id": normalized_bank,
+            "policy_type": normalized_type,
+            "updated_count": result['updated_count'],
+            "updated_ids": result['updated_ids']
+        }
+        
+        # Include errors if any occurred
+        if result['errors']:
+            response["errors"] = result['errors']
+            response["error_count"] = len(result['errors'])
+            if result['updated_count'] == 0:
+                response["status"] = "failed"
+                response["message"] = "All updates failed. See errors for details."
+            else:
+                response["status"] = "partial"
+                response["message"] = f"Updated {result['updated_count']} rules, but {len(result['errors'])} failed."
+        
+        print(f"✓ Updated {result['updated_count']} hierarchical rules in database")
+        if result['errors']:
+            print(f"⚠ {len(result['errors'])} updates failed")
+        
+        # If update_drl is requested, regenerate and redeploy DRL rules
+        if update_drl and result['updated_count'] > 0:
+            try:
+                print("\n" + "="*60)
+                print("Step 2: Regenerating DRL from updated hierarchical rules...")
+                print("="*60)
+                
+                # Get all hierarchical rules (with updates applied)
+                hierarchical_rules = db_service.get_hierarchical_rules(
+                    bank_id=normalized_bank,
+                    policy_type_id=normalized_type,
+                    active_only=True
+                )
+                
+                if not hierarchical_rules:
+                    response["drl_update"] = {
+                        "status": "skipped",
+                        "message": "No hierarchical rules found to convert to DRL"
+                    }
+                else:
+                    # Convert hierarchical rules to DRL
+                    from HierarchicalToDRLConverter import HierarchicalToDRLConverter
+                    converter = HierarchicalToDRLConverter()
+                    drl_content = converter.convert_to_drl(hierarchical_rules)
+                    
+                    print(f"✓ Generated DRL with {len(drl_content.splitlines())} lines")
+                    
+                    # Redeploy using existing deployment infrastructure
+                    print("\n" + "="*60)
+                    print("Step 3: Redeploying DRL rules to Drools...")
+                    print("="*60)
+                    
+                    deployment_result = underwritingWorkflow.drools_deployment.deploy_rules_automatically(
+                        drl_content=drl_content,
+                        container_id=container_id
+                    )
+                    
+                    response["drl_update"] = deployment_result
+                    
+                    if deployment_result["status"] == "success":
+                        print(f"✓ DRL rules redeployed successfully")
+                        
+                        # Update container version
+                        current_version = container.get('version', 1)
+                        new_version = current_version + 1
+                        
+                        db_service.update_container_version(
+                            container_id=container_id,
+                            version=new_version
+                        )
+                        
+                        response["new_version"] = new_version
+                        print(f"✓ Container version updated to {new_version}")
+                        
+                        # Upload new artifacts to S3 if available
+                        if "steps" in deployment_result:
+                            build_step = deployment_result["steps"].get("build", {})
+                            if build_step.get("status") == "success":
+                                jar_path = build_step.get("jar_path")
+                                drl_path = deployment_result["steps"].get("save_drl", {}).get("path")
+                                version_str = deployment_result["release_id"]["version"]
+                                
+                                s3_upload_results = {}
+                                
+                                # Upload JAR
+                                if jar_path and os.path.exists(jar_path):
+                                    jar_upload = s3Service.upload_jar_to_s3(jar_path, container_id, version_str)
+                                    if jar_upload["status"] == "success":
+                                        db_service.update_container_urls(container_id, s3_jar_url=jar_upload["s3_url"])
+                                        s3_upload_results["jar"] = jar_upload
+                                        os.unlink(jar_path)
+                                
+                                # Upload DRL
+                                if drl_path and os.path.exists(drl_path):
+                                    drl_upload = s3Service.upload_drl_to_s3(drl_path, container_id, version_str)
+                                    if drl_upload["status"] == "success":
+                                        db_service.update_container_urls(container_id, s3_drl_url=drl_upload["s3_url"])
+                                        s3_upload_results["drl"] = drl_upload
+                                        os.unlink(drl_path)
+                                
+                                if s3_upload_results:
+                                    response["drl_update"]["s3_upload"] = s3_upload_results
+                        
+                        # Log deployment history
+                        db_service.log_deployment_history(
+                            container_id=container_id,
+                            bank_id=normalized_bank,
+                            policy_type_id=normalized_type,
+                            action="updated",
+                            version=new_version,
+                            changes_description="DRL rules regenerated from updated hierarchical rules"
+                        )
+                        
+                        print(f"✓ Deployment history logged")
+                    else:
+                        print(f"✗ DRL redeployment failed: {deployment_result.get('message', 'Unknown error')}")
+                        response["status"] = "partial"
+                        response["message"] = f"Hierarchical rules updated, but DRL redeployment failed: {deployment_result.get('message')}"
+            
+            except Exception as drl_error:
+                print(f"✗ Error updating DRL: {drl_error}")
+                import traceback
+                traceback.print_exc()
+                response["drl_update"] = {
+                    "status": "error",
+                    "message": str(drl_error)
+                }
+                response["status"] = "partial"
+                response["message"] = f"Hierarchical rules updated, but DRL update failed: {str(drl_error)}"
+        
+        status_code = 200
+        if response["status"] == "failed":
+            status_code = 400
+        elif response["status"] == "partial":
+            status_code = 207  # Multi-Status
+        
+        return jsonify(response), status_code
+        
+    except Exception as e:
+        print(f"✗ Error in update_hierarchical_rules: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
 @app.route(ROUTE + '/api/v1/evaluate-policy', methods=['POST', 'OPTIONS'])
 def evaluate_policy():
     """

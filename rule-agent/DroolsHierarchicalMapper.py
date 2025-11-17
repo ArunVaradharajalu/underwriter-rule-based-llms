@@ -70,12 +70,28 @@ class DroolsHierarchicalMapper:
                 for child_rule in rule['dependencies']:
                     map_rule_recursive(child_rule)
 
-                # Parent rule inherits status from children if not explicitly set
-                if passed is None:
-                    all_children_passed = all(
-                        dep.get('passed', False) for dep in rule['dependencies']
-                    )
+                # Check if all dependencies passed
+                all_children_passed = all(
+                    dep.get('passed', False) for dep in rule['dependencies']
+                )
+                
+                # Parent rule should fail if ANY child fails (AND logic)
+                # This ensures hierarchical integrity: if any sub-requirement fails, parent fails
+                if not all_children_passed:
+                    rule['passed'] = False
+                    # Update actual to reflect child failure
+                    failed_children = [
+                        dep.get('name', dep.get('id', 'Unknown')) 
+                        for dep in rule['dependencies'] 
+                        if dep.get('passed') == False
+                    ]
+                    if failed_children:
+                        rule['actual'] = f"Failed sub-requirements: {', '.join(failed_children)}"
+                # If parent's own evaluation was None, inherit from children
+                elif passed is None:
                     rule['passed'] = all_children_passed
+                    if all_children_passed:
+                        rule['actual'] = "All sub-requirements passed"
 
             return rule
 
@@ -252,7 +268,14 @@ class DroolsHierarchicalMapper:
         if 'age' in rule_name or 'age' in expected:
             age = self._get_field_value('age', all_data)
             if age is not None:
-                if 'minimum' in rule_name or '>=' in expected or 'at least' in expected:
+                # Check for equality operator (= or ==)
+                if '=' in expected and '>=' not in expected and '<=' not in expected and 'between' not in expected:
+                    # Equality check: "Age = 25"
+                    age_match = re.search(r'=\s*(\d+)', expected)
+                    if age_match:
+                        required_age = int(age_match.group(1))
+                        return int(age) == required_age
+                elif 'minimum' in rule_name or '>=' in expected or 'at least' in expected:
                     # Extract minimum age from expected
                     min_age_match = re.search(r'(\d+)', expected)
                     if min_age_match:
@@ -276,10 +299,31 @@ class DroolsHierarchicalMapper:
         if 'credit' in rule_name or 'score' in rule_name:
             credit_score = self._get_field_value('credit score', all_data)
             if credit_score is not None:
-                min_score_match = re.search(r'(\d+)', expected)
-                if min_score_match:
-                    min_score = int(min_score_match.group(1))
-                    return int(credit_score) >= min_score
+                # Check for equality operator (= or ==)
+                if '=' in expected and '>=' not in expected and '<=' not in expected:
+                    # Equality check: "Credit score = 600"
+                    score_match = re.search(r'=\s*(\d+)', expected)
+                    if score_match:
+                        required_score = int(score_match.group(1))
+                        return int(credit_score) == required_score
+                # Check for >= (minimum threshold)
+                elif '>=' in expected or 'at least' in expected or 'minimum' in expected:
+                    min_score_match = re.search(r'(\d+)', expected)
+                    if min_score_match:
+                        min_score = int(min_score_match.group(1))
+                        return int(credit_score) >= min_score
+                # Check for <= (maximum threshold)
+                elif '<=' in expected or 'at most' in expected or 'maximum' in expected:
+                    max_score_match = re.search(r'(\d+)', expected)
+                    if max_score_match:
+                        max_score = int(max_score_match.group(1))
+                        return int(credit_score) <= max_score
+                # Default: extract number and assume minimum threshold (backward compatibility)
+                else:
+                    min_score_match = re.search(r'(\d+)', expected)
+                    if min_score_match:
+                        min_score = int(min_score_match.group(1))
+                        return int(credit_score) >= min_score
 
         # Health status checks
         if 'health' in rule_name:
@@ -292,10 +336,26 @@ class DroolsHierarchicalMapper:
         if 'income' in rule_name:
             income = self._get_field_value('income', all_data)
             if income is not None:
-                min_income_match = re.search(r'(\d+)', expected)
-                if min_income_match:
-                    min_income = int(min_income_match.group(1))
-                    return int(income) >= min_income
+                # Check for equality operator (= or ==)
+                if '=' in expected and '>=' not in expected and '<=' not in expected:
+                    # Equality check: "Income = $50,000"
+                    income_match = re.search(r'=\s*\$?\s*([\d,]+)', expected)
+                    if income_match:
+                        required_income_str = income_match.group(1).replace(',', '')
+                        required_income = int(required_income_str)
+                        return int(income) == required_income
+                # Check for >= (minimum threshold)
+                elif '>=' in expected or 'at least' in expected or 'minimum' in expected:
+                    min_income_match = re.search(r'(\d+)', expected)
+                    if min_income_match:
+                        min_income = int(min_income_match.group(1))
+                        return int(income) >= min_income
+                # Default: extract number and assume minimum threshold (backward compatibility)
+                else:
+                    min_income_match = re.search(r'(\d+)', expected)
+                    if min_income_match:
+                        min_income = int(min_income_match.group(1))
+                        return int(income) >= min_income
 
         # Strategy 3: If overall decision was approved and no specific failure detected, assume passed
         if decision_approved and not decision_reasons:
