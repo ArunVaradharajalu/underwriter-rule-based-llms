@@ -95,9 +95,21 @@ For MATRICES (e.g., 3×3 combinations), generate queries for ALL cells:
 Return a JSON object with this ENHANCED structure:
 {{
     "queries": [
-        "What is the maximum coverage amount?",
-        "What credit score is required for Tier A classification?",
-        "What is the minimum income for Tier A applicants with excellent health?",
+        {{
+            "query_text": "What is the maximum coverage amount?",
+            "page_number": 3,
+            "clause_reference": "Article II, Section 2.1"
+        }},
+        {{
+            "query_text": "What credit score is required for Tier A classification?",
+            "page_number": 5,
+            "clause_reference": "Article III, Section 3.2.1"
+        }},
+        {{
+            "query_text": "What is the minimum income for Tier A applicants with excellent health?",
+            "page_number": 7,
+            "clause_reference": "Article IV, Section 4.1.1"
+        }},
         ...
     ],
     "key_sections": [
@@ -117,14 +129,26 @@ Return a JSON object with this ENHANCED structure:
             "stage_name": "Primary Eligibility / Classification",
             "article_section": "Article II",
             "establishes": ["CreditTier", "HealthStatus", "AgeBracket"],
-            "queries": ["What credit score defines Tier A?", ...]
+            "queries": [
+                {{
+                    "query_text": "What credit score defines Tier A?",
+                    "page_number": 5,
+                    "clause_reference": "Article II, Section 2.1"
+                }}
+            ]
         }},
         {{
             "stage_number": 2,
             "stage_name": "Financial Capacity Requirements",
             "article_section": "Article III",
             "depends_on": ["CreditTier", "HealthStatus", "AgeBracket"],
-            "queries": ["What is minimum income for Tier A + Excellent Health?", ...]
+            "queries": [
+                {{
+                    "query_text": "What is minimum income for Tier A + Excellent Health?",
+                    "page_number": 7,
+                    "clause_reference": "Article III, Section 3.1"
+                }}
+            ]
         }}
     ],
     "intermediate_facts": [
@@ -146,7 +170,10 @@ IMPORTANT:
 - Mark which queries depend on establishing earlier facts first
 - Detect special rejection rules that combine multiple factors
 - Make queries specific and actionable - each query should extract a concrete value or fact
-- Do NOT summarize - extract EVERY distinct policy separately"""),
+- Do NOT summarize - extract EVERY distinct policy separately
+- CRITICAL: For EACH query, include the page_number and clause_reference (e.g., "Article II, Section 2.1" or "Clause 5.2")
+- Look for section headers, article numbers, clause references in the document to extract accurate source locations
+- If the exact page/clause is unclear, make your best estimate based on document structure"""),
             ("user", "Policy document text:\n\n{document_text}")
         ])
 

@@ -42,6 +42,8 @@ IMPORTANT INSTRUCTIONS:
    - actual: What would be checked/validated (leave as placeholder if not evaluating)
    - confidence: Your confidence in extracting this rule (0.0 to 1.0)
    - passed: null (will be determined during evaluation)
+   - page_number: Page number in the document where this rule is found (integer)
+   - clause_reference: Clause/section reference (e.g., "Article II, Section 2.1", "Clause 5.2")
    - dependencies: Array of child rules (can be nested unlimited levels)
 
 3. Organize rules logically:
@@ -70,6 +72,8 @@ Return a JSON array of top-level rules with nested dependencies. Example structu
     "actual": "To be evaluated",
     "confidence": 0.95,
     "passed": null,
+    "page_number": 3,
+    "clause_reference": "Article II",
     "dependencies": [
       {{
         "id": "1.1",
@@ -79,6 +83,8 @@ Return a JSON array of top-level rules with nested dependencies. Example structu
         "actual": "To be evaluated",
         "confidence": 0.98,
         "passed": null,
+        "page_number": 3,
+        "clause_reference": "Article II, Section 2.1",
         "dependencies": [
           {{
             "id": "1.1.1",
@@ -88,6 +94,8 @@ Return a JSON array of top-level rules with nested dependencies. Example structu
             "actual": "To be evaluated",
             "confidence": 0.99,
             "passed": null,
+            "page_number": 3,
+            "clause_reference": "Article II, Section 2.1.1",
             "dependencies": []
           }},
           {{
@@ -98,6 +106,8 @@ Return a JSON array of top-level rules with nested dependencies. Example structu
             "actual": "To be evaluated",
             "confidence": 0.99,
             "passed": null,
+            "page_number": 3,
+            "clause_reference": "Article II, Section 2.1.2",
             "dependencies": []
           }}
         ]
@@ -110,11 +120,15 @@ Return a JSON array of top-level rules with nested dependencies. Example structu
         "actual": "To be evaluated",
         "confidence": 0.92,
         "passed": null,
+        "page_number": 5,
+        "clause_reference": "Article III, Section 3.1",
         "dependencies": []
       }}
     ]
   }}
 ]
+
+CRITICAL: Include page_number and clause_reference for EVERY rule at all levels of the hierarchy. Look for section headers, article numbers, and clause references in the policy document.
 
 Generate comprehensive hierarchical rules now:"""
 

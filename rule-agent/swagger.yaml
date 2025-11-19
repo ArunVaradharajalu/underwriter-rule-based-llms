@@ -20,6 +20,19 @@ info:
     - Health checking ensures high availability
     - LLM-generated queries and Textract responses stored for audit trail
 
+    **What's New in v2.7:**
+    - Page numbers and clause references for all rules and queries
+    - Track exact source location of each rule in policy documents
+    - ExtractedRule schema includes `page_number` and `clause_reference`
+    - HierarchicalRule schema includes `page_number` and `clause_reference`
+    - ExtractionQuery schema includes `page_number` and `clause_reference`
+    - Better traceability and audit trail for compliance
+    - **Test Harness Generation**: Automated Excel test harness with hierarchical rules and test cases
+    - Test harness includes 5 sheets: Hierarchical Rules, Test Cases, Test Execution, Coverage Summary, Instructions
+    - Automated pass/fail formulas for test execution tracking
+    - Pre-signed URLs for test harness download via `test_harness_presigned_url`
+    - Container schema includes `s3_test_harness_url` and `test_harness_presigned_url`
+
     **What's New in v2.6:**
     - Enhanced `/api/v1/policies/update-hierarchical-rules` with optional DRL update
     - Set `update_drl: true` to regenerate and redeploy DRL rules from hierarchical rules
@@ -58,7 +71,7 @@ info:
     - Complete transparency into rule extraction process
     - Query performance and quality monitoring via confidence scores
 
-  version: 2.6.0
+  version: 2.7.0
   contact:
     name: IBM Automation
     url: https://github.com/DecisionsDev
@@ -375,6 +388,8 @@ paths:
                       drl_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.drl?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=0p80af2fjnczmsXdiDNZH011aRE%3D&Expires=1763167243"
                       s3_excel_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx"
                       excel_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=lW3SDM5uUFwh5wTohnepXMVNNl0%3D&Expires=1763167243"
+                      s3_test_harness_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/chase/insurance/test-harness/chase_insurance_test_harness_20251118_143000.xlsx"
+                      test_harness_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/chase/insurance/test-harness/chase_insurance_test_harness_20251118_143000.xlsx?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2u%3D&Expires=1763167243"
                 with-queries-and-rules:
                   summary: Response with extraction queries and rules
                   value:
@@ -395,12 +410,16 @@ paths:
                       drl_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase-insurance_20251113_235629.drl?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=0p80af2fjnczmsXdiDNZH011aRE%3D&Expires=1763167243"
                       s3_excel_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx"
                       excel_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=lW3SDM5uUFwh5wTohnepXMVNNl0%3D&Expires=1763167243"
+                      s3_test_harness_url: "https://uw-data-extraction.s3.us-east-1.amazonaws.com/chase/insurance/test-harness/chase_insurance_test_harness_20251118_143000.xlsx"
+                      test_harness_presigned_url: "https://uw-data-extraction.s3.amazonaws.com/chase/insurance/test-harness/chase_insurance_test_harness_20251118_143000.xlsx?AWSAccessKeyId=AKIAZB6VY36KXF7T43V5&Signature=aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2u%3D&Expires=1763167243"
                     extraction_queries_count: 20
                     extraction_queries:
                       - id: 1
                         query_text: "What is the maximum coverage amount?"
                         response_text: "$1,000,000"
                         confidence_score: 95.5
+                        page_number: 5
+                        clause_reference: "Article III, Section 3.1"
                         document_hash: "abc123..."
                         source_document: "s3://bucket/policy.pdf"
                         extraction_method: "textract"
@@ -412,6 +431,8 @@ paths:
                         query_text: "What is the minimum age requirement?"
                         response_text: "18 years"
                         confidence_score: 98.2
+                        page_number: 3
+                        clause_reference: "Article II, Section 2.1"
                         document_hash: "abc123..."
                         source_document: "s3://bucket/policy.pdf"
                         extraction_method: "textract"
@@ -425,6 +446,8 @@ paths:
                         rule_name: "Minimum Age Requirement"
                         requirement: "Applicant must be at least 18 years old"
                         category: "Age Requirements"
+                        page_number: 3
+                        clause_reference: "Article II, Section 2.1"
                         source_document: "s3://bucket/policy.pdf"
                         document_hash: "abc123..."
                         extraction_timestamp: "2025-11-12T09:00:00"
@@ -1313,6 +1336,8 @@ paths:
                         rule_name: Minimum Age Requirement
                         requirement: Applicant must be at least 18 years old (MANDATORY - Applications under 18 are AUTOMATICALLY REJECTED)
                         category: Age Requirements
+                        page_number: 3
+                        clause_reference: "Article II, Section 2.1"
                         source_document: sample_life_insurance_policy.txt
                         document_hash: abc123def456
                         extraction_timestamp: "2025-11-10T10:30:00"
@@ -1323,6 +1348,8 @@ paths:
                         rule_name: Minimum Credit Score
                         requirement: Credit score must be at least 600 (MANDATORY - Applications under 600 are AUTOMATICALLY REJECTED)
                         category: Credit Score Requirements
+                        page_number: 5
+                        clause_reference: "Article III, Section 3.1"
                         source_document: sample_life_insurance_policy.txt
                         document_hash: abc123def456
                         extraction_timestamp: "2025-11-10T10:30:00"
@@ -1333,6 +1360,8 @@ paths:
                         rule_name: Minimum Annual Income
                         requirement: Annual income must be at least $25,000
                         category: Income Requirements
+                        page_number: 7
+                        clause_reference: "Article IV, Section 4.1"
                         source_document: sample_life_insurance_policy.txt
                         document_hash: abc123def456
                         extraction_timestamp: "2025-11-10T10:30:00"
@@ -1773,6 +1802,16 @@ components:
           format: uri
           description: Pre-signed S3 URL for downloading the Excel file (expires in 24 hours)
           example: https://uw-data-extraction.s3.amazonaws.com/generated-rules/chase-insurance/20251113.235623/chase_insurance_rules_20251113_235630.xlsx?AWSAccessKeyId=...&Signature=...&Expires=1763167243
+        s3_test_harness_url:
+          type: string
+          format: uri
+          description: S3 URL of the test harness Excel file with hierarchical rules and test cases (NEW in v2.7)
+          example: https://uw-data-extraction.s3.us-east-1.amazonaws.com/chase/insurance/test-harness/chase_insurance_test_harness_20251118_143000.xlsx
+        test_harness_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the test harness file (expires in 24 hours) (NEW in v2.7)
+          example: https://uw-data-extraction.s3.amazonaws.com/chase/insurance/test-harness/chase_insurance_test_harness_20251118_143000.xlsx?AWSAccessKeyId=...&Signature=...&Expires=1763167243
 
     DeploymentInfo:
       type: object
@@ -1832,6 +1871,14 @@ components:
           type: string
           format: uri
           description: Pre-signed S3 URL for downloading the Excel file (expires in 24 hours)
+        s3_test_harness_url:
+          type: string
+          format: uri
+          description: S3 URL of the test harness Excel file with hierarchical rules and test cases (NEW in v2.7)
+        test_harness_presigned_url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL for downloading the test harness file (expires in 24 hours) (NEW in v2.7)
 
     EvaluationResult:
       type: object
@@ -1966,6 +2013,14 @@ components:
           type: string
           description: Category for grouping rules
           example: Age Requirements
+        page_number:
+          type: integer
+          description: 'Page number in the source document where this rule was found (NEW in v2.7)'
+          example: 3
+        clause_reference:
+          type: string
+          description: 'Clause or section reference in the policy document (e.g., "Article II, Section 3.1", "Clause 5.2") (NEW in v2.7)'
+          example: "Article II, Section 2.1"
         source_document:
           type: string
           description: Source document path or name from which the rule was extracted
@@ -2029,6 +2084,14 @@ components:
           type: boolean
           description: Whether the rule passed validation
           example: true
+        page_number:
+          type: integer
+          description: 'Page number in the source document where this rule was found (NEW in v2.7)'
+          example: 3
+        clause_reference:
+          type: string
+          description: 'Clause or section reference in the policy document (e.g., "Article II, Section 3.1", "Clause 5.2") (NEW in v2.7)'
+          example: "Article II, Section 2.1"
         dependencies:
           type: array
           description: Child rules that this rule depends on
@@ -2042,6 +2105,8 @@ components:
               actual: "1998-05-15"
               confidence: 0.98
               passed: true
+              page_number: 3
+              clause_reference: "Article II, Section 2.1.1"
               dependencies: []
 
     EvaluatedHierarchicalRule:
@@ -2079,6 +2144,14 @@ components:
           type: boolean
           description: Whether the rule passed validation (true/false/null if not evaluated)
           example: true
+        page_number:
+          type: integer
+          description: 'Page number in the source document where this rule was found (NEW in v2.7)'
+          example: 3
+        clause_reference:
+          type: string
+          description: 'Clause or section reference in the policy document (e.g., "Article II, Section 3.1", "Clause 5.2") (NEW in v2.7)'
+          example: "Article II, Section 2.1.1"
         dependencies:
           type: array
           description: Child rules that this rule depends on (also evaluated)
@@ -2108,6 +2181,14 @@ components:
           minimum: 0
           maximum: 100
           example: 95.5
+        page_number:
+          type: integer
+          description: 'Page number in the source document where this query was targeted (NEW in v2.7)'
+          example: 3
+        clause_reference:
+          type: string
+          description: 'Clause or section reference in the policy document (e.g., "Article II, Section 3.1", "Clause 5.2") (NEW in v2.7)'
+          example: "Article II, Section 2.1"
         document_hash:
           type: string
           description: Hash of the source document for linking to containers

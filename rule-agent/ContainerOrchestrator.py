@@ -216,20 +216,30 @@ class ContainerOrchestrator:
         import docker
 
         try:
+            print(f"\n{'='*80}")
+            print(f"DEBUG: Starting Docker container creation for container_id: {container_id}")
+            print(f"DEBUG: Ruleapp path: {ruleapp_path}")
+            print(f"{'='*80}")
+
             client = docker.from_env()
+            print(f"DEBUG: Docker client initialized successfully")
 
             # Determine next available port
             port = self._get_next_available_port()
+            print(f"DEBUG: Allocated port: {port}")
 
             # Container name
             container_name = f"drools-{container_id}"
+            print(f"DEBUG: Container name: {container_name}")
 
             # Check if container already exists
             existing = self._check_existing_docker_container(client, container_name)
             if existing:
+                print(f"DEBUG: Container {container_name} already exists")
                 # Check if already in database
                 db_container = self.db_service.get_container_by_id(container_id)
                 if db_container:
+                    print(f"DEBUG: Container found in database with endpoint: {db_container['endpoint']}")
                     return {
                         "status": "exists",
                         "message": f"Container {container_name} already exists",
@@ -237,6 +247,7 @@ class ContainerOrchestrator:
                     }
                 else:
                     # Container exists but not in database - return error to avoid conflicts
+                    print(f"DEBUG: Container exists but NOT in database - conflict detected")
                     return {
                         "status": "error",
                         "message": f"Container {container_name} already exists but not in database. Please delete it first: docker rm -f {container_name}"
@@ -269,51 +280,82 @@ class ContainerOrchestrator:
                 print(f"⚠ Network lookup error: {net_err}")
                 raise
 
-            print(f"Creating Docker container: {container_name} on port {port}")
+            print(f"DEBUG: Creating Docker container: {container_name} on port {port}")
+            print(f"DEBUG: Network: {network_obj.name}")
+            print(f"DEBUG: Volume: {volume_name}")
+            print(f"DEBUG: Memory limit: 2GB, JVM heap: 512m-1024m")
 
             # Create and start container
-            container = client.containers.run(
-                image="quay.io/kiegroup/kie-server-showcase:latest",
-                name=container_name,
-                hostname=container_name,
-                detach=True,
-                ports={'8080/tcp': port},
-                network=network_obj.name,  # Use the actual network name found
-                environment={
-                    'KIE_SERVER_ID': container_id,
-                    'KIE_SERVER_USER': 'kieserver',
-                    'KIE_SERVER_PWD': 'kieserver1!',
-                    'KIE_SERVER_LOCATION': f'http://{container_name}:8080/kie-server/services/rest/server',
-                    'KIE_SERVER_CONTROLLER_USER': 'kieserver',
-                    'KIE_SERVER_CONTROLLER_PWD': 'kieserver1!',
-                },
-                volumes={
-                    volume_name: {'bind': '/opt/jboss/.m2/repository', 'mode': 'rw'}
-                },
-                restart_policy={"Name": "unless-stopped"},  # Auto-restart container unless manually stopped
-                healthcheck={
-                    'test': ['CMD', 'curl', '-f', '-u', 'kieserver:kieserver1!',
-                            'http://localhost:8080/kie-server/services/rest/server'],
-                    'interval': 10000000000,  # 10s in nanoseconds
-                    'timeout': 10000000000,
-                    'retries': 30,
-                    'start_period': 30000000000
-                }
-            )
+            try:
+                container = client.containers.run(
+                    image="quay.io/kiegroup/kie-server-showcase:latest",
+                    name=container_name,
+                    hostname=container_name,
+                    detach=True,
+                    ports={'8080/tcp': port},
+                    network=network_obj.name,  # Use the actual network name found
+                    environment={
+                        'KIE_SERVER_ID': container_id,
+                        'KIE_SERVER_USER': 'kieserver',
+                        'KIE_SERVER_PWD': 'kieserver1!',
+                        'KIE_SERVER_LOCATION': f'http://{container_name}:8080/kie-server/services/rest/server',
+                        'KIE_SERVER_CONTROLLER_USER': 'kieserver',
+                        'KIE_SERVER_CONTROLLER_PWD': 'kieserver1!',
+                        'JAVA_OPTS': '-Xms512m -Xmx1024m'  # Set JVM heap size
+                    },
+                    volumes={
+                        volume_name: {'bind': '/opt/jboss/.m2/repository', 'mode': 'rw'}
+                    },
+                    mem_limit='2g',  # Container memory limit (2GB)
+                    memswap_limit='2g',  # Disable swap
+                    restart_policy={"Name": "unless-stopped"},  # Auto-restart container unless manually stopped
+                    healthcheck={
+                        'test': ['CMD', 'curl', '-f', '-u', 'kieserver:kieserver1!',
+                                'http://localhost:8080/kie-server/services/rest/server'],
+                        'interval': 10000000000,  # 10s in nanoseconds
+                        'timeout': 10000000000,
+                        'retries': 30,
+                        'start_period': 30000000000
+                    }
+                )
+                print(f"DEBUG: Container created successfully - ID: {container.id[:12]}")
+                print(f"DEBUG: Container status: {container.status}")
+            except Exception as create_err:
+                print(f"DEBUG: FAILED to create container - Error: {str(create_err)}")
+                import traceback
+                traceback.print_exc()
+                raise
 
             # Wait for container to be healthy
             endpoint = f"http://{container_name}:8080"
-            self._wait_for_container_health(endpoint, container_name)
+            print(f"DEBUG: Waiting for container health check at endpoint: {endpoint}")
+            try:
+                self._wait_for_container_health(endpoint, container_name)
+                print(f"DEBUG: Container health check PASSED")
+            except Exception as health_err:
+                print(f"DEBUG: Container health check FAILED - Error: {str(health_err)}")
+                # Get container logs for debugging
+                try:
+                    container.reload()
+                    print(f"DEBUG: Container status after health check failure: {container.status}")
+                    logs = container.logs(tail=50).decode('utf-8')
+                    print(f"DEBUG: Container logs (last 50 lines):\n{logs}")
+                except Exception as log_err:
+                    print(f"DEBUG: Could not retrieve container logs: {str(log_err)}")
+                raise
 
             # Extract bank_id and policy_type from container_id
             # Format: {bank_id}-{policy_type}-underwriting-rules
             parts = container_id.split('-')
             bank_id = parts[0] if len(parts) >= 1 else 'unknown'
             policy_type_id = parts[1] if len(parts) >= 2 else 'unknown'
+            print(f"DEBUG: Extracted bank_id: {bank_id}, policy_type_id: {policy_type_id}")
 
             # Ensure bank and policy type exist in database
+            print(f"DEBUG: Creating/verifying bank and policy type in database")
             self.db_service.create_bank(bank_id, bank_id.replace('_', ' ').title())
             self.db_service.create_policy_type(policy_type_id, policy_type_id.replace('_', ' ').title())
+            print(f"DEBUG: Bank and policy type verified in database")
 
             # Register in database
             container_data = {
@@ -327,8 +369,15 @@ class ContainerOrchestrator:
                 'status': 'running',
                 'health_status': 'healthy'
             }
+            print(f"DEBUG: Registering container in database with data: {container_data}")
             self.db_service.register_container(container_data)
             logger.info(f"Registered container {container_id} in database")
+            print(f"DEBUG: Container registration in database SUCCESSFUL")
+
+            print(f"{'='*80}")
+            print(f"DEBUG: Docker container creation COMPLETED SUCCESSFULLY")
+            print(f"DEBUG: Container: {container_name}, Endpoint: {endpoint}, Port: {port}")
+            print(f"{'='*80}\n")
 
             return {
                 "status": "success",
@@ -339,7 +388,14 @@ class ContainerOrchestrator:
             }
 
         except Exception as e:
-            print(f"Error creating Docker container: {str(e)}")
+            print(f"\n{'='*80}")
+            print(f"DEBUG: FATAL ERROR in Docker container creation")
+            print(f"DEBUG: Error type: {type(e).__name__}")
+            print(f"DEBUG: Error message: {str(e)}")
+            print(f"{'='*80}")
+            import traceback
+            traceback.print_exc()
+            print(f"{'='*80}\n")
             return {
                 "status": "error",
                 "message": f"Failed to create Docker container: {str(e)}"

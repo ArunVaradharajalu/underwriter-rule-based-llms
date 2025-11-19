@@ -80,6 +80,7 @@ class RuleContainer(Base):
     s3_jar_url = Column(String(500))
     s3_drl_url = Column(String(500))
     s3_excel_url = Column(String(500))
+    s3_test_harness_url = Column(Text)
 
     # Versioning
     version = Column(Integer, default=1)
@@ -197,6 +198,10 @@ class ExtractedRule(Base):
     category = Column(String(100))
     source_document = Column(String(500))
 
+    # Source location tracking
+    page_number = Column(Integer)
+    clause_reference = Column(String(100))
+
     # Metadata
     document_hash = Column(String(64))
     extraction_timestamp = Column(DateTime, default=datetime.utcnow)
@@ -214,6 +219,8 @@ class ExtractedRule(Base):
         Index('idx_extracted_rules_bank_policy', 'bank_id', 'policy_type_id'),
         Index('idx_extracted_rules_active', 'is_active'),
         Index('idx_extracted_rules_created_at', 'created_at'),
+        Index('idx_extracted_rules_page', 'page_number'),
+        Index('idx_extracted_rules_clause', 'clause_reference'),
     )
 
 
@@ -228,6 +235,10 @@ class PolicyExtractionQuery(Base):
     query_text = Column(Text, nullable=False)
     response_text = Column(Text)
     confidence_score = Column(Integer)  # Textract confidence score (0-100)
+
+    # Source location tracking
+    page_number = Column(Integer)
+    clause_reference = Column(String(100))
 
     # Metadata
     document_hash = Column(String(64), nullable=False)
@@ -251,6 +262,8 @@ class PolicyExtractionQuery(Base):
         Index('idx_extraction_queries_document_hash', 'document_hash'),
         Index('idx_extraction_queries_active', 'is_active'),
         Index('idx_extraction_queries_created_at', 'created_at'),
+        Index('idx_extraction_queries_page', 'page_number'),
+        Index('idx_extraction_queries_clause', 'clause_reference'),
     )
 
 
@@ -275,6 +288,10 @@ class HierarchicalRule(Base):
     level = Column(Integer, default=0)  # 0 for root, 1 for first level children, etc.
     order_index = Column(Integer, default=0)  # For maintaining order within same parent
 
+    # Source location tracking
+    page_number = Column(Integer)
+    clause_reference = Column(String(100))
+
     # Metadata
     document_hash = Column(String(64))
     source_document = Column(String(500))
@@ -295,6 +312,8 @@ class HierarchicalRule(Base):
         Index('idx_hierarchical_rules_active', 'is_active'),
         Index('idx_hierarchical_rules_hash', 'document_hash'),
         Index('idx_hierarchical_rules_level', 'level'),
+        Index('idx_hierarchical_rules_page', 'page_number'),
+        Index('idx_hierarchical_rules_clause', 'clause_reference'),
     )
 
 
@@ -597,6 +616,7 @@ class DatabaseService:
             's3_jar_url': container.s3_jar_url,
             's3_drl_url': container.s3_drl_url,
             's3_excel_url': container.s3_excel_url,
+            's3_test_harness_url': container.s3_test_harness_url,
             'version': container.version,
             'is_active': container.is_active,
             'cpu_limit': container.cpu_limit,
@@ -672,7 +692,7 @@ class DatabaseService:
                 logger.info(f"Updated container {container_id} status to {status}")
             return container
 
-    def update_container_urls(self, container_id: str, s3_jar_url: str = None, s3_drl_url: str = None, s3_excel_url: str = None, s3_policy_url: str = None) -> Optional[RuleContainer]:
+    def update_container_urls(self, container_id: str, s3_jar_url: str = None, s3_drl_url: str = None, s3_excel_url: str = None, s3_policy_url: str = None, s3_test_harness_url: str = None) -> Optional[RuleContainer]:
         """Update container S3 artifact URLs"""
         with self.get_session() as session:
             container = session.query(RuleContainer).filter_by(container_id=container_id).first()
@@ -685,6 +705,8 @@ class DatabaseService:
                     container.s3_excel_url = s3_excel_url
                 if s3_policy_url:
                     container.s3_policy_url = s3_policy_url
+                if s3_test_harness_url:
+                    container.s3_test_harness_url = s3_test_harness_url
                 session.commit()
                 session.refresh(container)
             return container
@@ -809,6 +831,8 @@ class DatabaseService:
                         requirement=rule_data.get('requirement', rule_data.get('Requirement', '')),
                         category=rule_data.get('category', rule_data.get('Category', 'General')),
                         source_document=source_document or rule_data.get('source_document', rule_data.get('Source Document', '')),
+                        page_number=rule_data.get('page_number'),
+                        clause_reference=rule_data.get('clause_reference'),
                         document_hash=document_hash,
                         is_active=True
                     )
@@ -854,6 +878,8 @@ class DatabaseService:
                     'requirement': rule.requirement,
                     'category': rule.category,
                     'source_document': rule.source_document,
+                    'page_number': rule.page_number,
+                    'clause_reference': rule.clause_reference,
                     'document_hash': rule.document_hash,
                     'extraction_timestamp': rule.extraction_timestamp.isoformat() if rule.extraction_timestamp else None,
                     'is_active': rule.is_active,
@@ -924,6 +950,8 @@ class DatabaseService:
                         query_text=query_data.get('query_text', query_data.get('query', '')),
                         response_text=query_data.get('response_text', query_data.get('response', '')),
                         confidence_score=query_data.get('confidence_score', query_data.get('confidence')),
+                        page_number=query_data.get('page_number'),
+                        clause_reference=query_data.get('clause_reference'),
                         document_hash=document_hash,
                         source_document=source_document or query_data.get('source_document', ''),
                         extraction_method=query_data.get('extraction_method', 'textract'),
@@ -976,6 +1004,8 @@ class DatabaseService:
                     'query_text': q.query_text,
                     'response_text': q.response_text,
                     'confidence_score': float(q.confidence_score) if q.confidence_score is not None else None,
+                    'page_number': q.page_number,
+                    'clause_reference': q.clause_reference,
                     'document_hash': q.document_hash,
                     'source_document': q.source_document,
                     'extraction_method': q.extraction_method,
@@ -1047,6 +1077,16 @@ class DatabaseService:
             List of created rule IDs
         """
         with self.get_session() as session:
+            # Deactivate existing hierarchical rules for this bank/policy combination
+            session.query(HierarchicalRule).filter_by(
+                bank_id=bank_id,
+                policy_type_id=policy_type_id,
+                is_active=True
+            ).update({'is_active': False})
+
+            # Flush the deactivation before inserting new records
+            session.flush()
+
             created_ids = []
 
             def save_rule_recursive(rule_data: Dict[str, Any], parent_id: int = None, level: int = 0, order: int = 0) -> int:
@@ -1064,6 +1104,8 @@ class DatabaseService:
                     parent_id=parent_id,
                     level=level,
                     order_index=order,
+                    page_number=rule_data.get('page_number'),
+                    clause_reference=rule_data.get('clause_reference'),
                     document_hash=document_hash,
                     source_document=source_document
                 )
@@ -1123,6 +1165,8 @@ class DatabaseService:
                     'actual': rule.actual,
                     'confidence': rule.confidence,
                     'passed': rule.passed,
+                    'page_number': rule.page_number,
+                    'clause_reference': rule.clause_reference,
                     'dependencies': []
                 }
 
@@ -1245,6 +1289,12 @@ class DatabaseService:
                     if 'name' in update_data:
                         rule.name = update_data['name']
                         updated = True
+                    if 'page_number' in update_data:
+                        rule.page_number = update_data['page_number']
+                        updated = True
+                    if 'clause_reference' in update_data:
+                        rule.clause_reference = update_data['clause_reference']
+                        updated = True
                     
                     if updated:
                         # updated_at will be automatically updated by SQLAlchemy
@@ -1332,6 +1382,16 @@ class DatabaseService:
             List of created test case IDs
         """
         with self.get_session() as session:
+            # Deactivate existing test cases for this bank/policy combination
+            session.query(TestCase).filter_by(
+                bank_id=bank_id,
+                policy_type_id=policy_type_id,
+                is_active=True
+            ).update({'is_active': False})
+
+            # Flush the deactivation before inserting new records
+            session.flush()
+
             test_case_ids = []
 
             for tc in test_cases:

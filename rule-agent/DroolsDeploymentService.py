@@ -665,11 +665,22 @@ Manual Deployment Steps:
                     print(f"✓ Deployed to main Drools server")
 
                 # Now deploy to the dedicated container
+                print(f"\n{'='*80}")
+                print(f"DEBUG: Starting dedicated container deployment")
+                print(f"DEBUG: Container ID: {container_id}")
+                print(f"DEBUG: JAR path: {jar_path}")
+                print(f"DEBUG: Group ID: {group_id}, Artifact ID: {artifact_id}, Version: {version}")
+                print(f"{'='*80}")
+
                 print(f"Deploying KJar to dedicated container {container_id}...")
                 dedicated_deploy_result = self.orchestrator.deploy_kjar_to_container(
                     container_id, jar_path, group_id, artifact_id, version
                 )
                 result["steps"]["deploy_dedicated"] = dedicated_deploy_result
+
+                print(f"DEBUG: Dedicated deployment result status: {dedicated_deploy_result.get('status')}")
+                print(f"DEBUG: Dedicated deployment result message: {dedicated_deploy_result.get('message')}")
+                print(f"DEBUG: Full dedicated deployment result: {dedicated_deploy_result}")
 
                 if dedicated_deploy_result["status"] == "success":
                     print(f"✓ KJar deployed to dedicated container")
@@ -679,6 +690,8 @@ Manual Deployment Steps:
                     print(f"⚠ Failed to deploy to dedicated container: {dedicated_deploy_result.get('message')}")
                     result["status"] = "partial"
                     result["message"] = "Deployed to main server but failed to deploy to dedicated container"
+
+                print(f"{'='*80}\n")
 
             else:
                 # No orchestrator - deploy to main Drools server only

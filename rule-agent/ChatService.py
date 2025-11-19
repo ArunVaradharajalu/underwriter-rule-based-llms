@@ -721,6 +721,13 @@ def query_policies():
             if excel_presigned:
                 response_data["container"]["excel_presigned_url"] = excel_presigned
 
+        if container.get('s3_test_harness_url'):
+            response_data["container"]["s3_test_harness_url"] = container['s3_test_harness_url']
+            # Generate pre-signed URL for test harness file
+            test_harness_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_test_harness_url'], expiration=86400)
+            if test_harness_presigned:
+                response_data["container"]["test_harness_presigned_url"] = test_harness_presigned
+
         # Include extraction queries if requested
         if include_queries:
             extraction_queries = db_service.get_extraction_queries(
@@ -1517,7 +1524,8 @@ def get_deployment(deployment_id):
             "s3_policy_url": container['s3_policy_url'],
             "s3_jar_url": container['s3_jar_url'],
             "s3_drl_url": container['s3_drl_url'],
-            "s3_excel_url": container['s3_excel_url']
+            "s3_excel_url": container['s3_excel_url'],
+            "s3_test_harness_url": container.get('s3_test_harness_url')
         }
 
         # Generate pre-signed URLs for all S3 documents
@@ -1540,6 +1548,11 @@ def get_deployment(deployment_id):
             excel_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_excel_url'], expiration=86400)
             if excel_presigned:
                 deployment_data["excel_presigned_url"] = excel_presigned
+
+        if container.get('s3_test_harness_url'):
+            test_harness_presigned = s3Service.generate_presigned_url_from_s3_url(container['s3_test_harness_url'], expiration=86400)
+            if test_harness_presigned:
+                deployment_data["test_harness_presigned_url"] = test_harness_presigned
 
         return jsonify({
             "status": "success",

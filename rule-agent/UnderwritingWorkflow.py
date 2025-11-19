@@ -18,6 +18,7 @@ from TextractService import TextractService
 from RuleGeneratorAgent import RuleGeneratorAgent
 from HierarchicalRulesAgent import HierarchicalRulesAgent
 from TestCaseGenerator import TestCaseGenerator
+from TestHarnessGenerator import TestHarnessGenerator
 from DroolsDeploymentService import DroolsDeploymentService
 from S3Service import S3Service
 from ExcelRulesExporter import ExcelRulesExporter
@@ -30,6 +31,7 @@ import io
 from typing import Dict, List, Optional
 from langchain_openai import ChatOpenAI
 import hashlib
+from datetime import datetime
 
 class UnderwritingWorkflow:
     """
@@ -50,6 +52,7 @@ class UnderwritingWorkflow:
         self.rule_generator = RuleGeneratorAgent(llm)
         self.hierarchical_rules_agent = HierarchicalRulesAgent(llm)
         self.test_case_generator = TestCaseGenerator(llm)
+        self.test_harness_generator = TestHarnessGenerator()
         self.drools_deployment = DroolsDeploymentService()
         self.s3_service = S3Service()
         self.excel_exporter = ExcelRulesExporter()
@@ -89,11 +92,16 @@ class UnderwritingWorkflow:
             print(f"Auto-generated container ID (no bank): {container_id}")
             print("Warning: No bank_id provided. Consider specifying bank_id for multi-tenant deployments.")
 
+        # Generate version timestamp early so it can be used consistently across all artifacts
+        version = datetime.now().strftime("%Y%m%d.%H%M%S")
+        print(f"Generated version: {version}")
+
         result = {
             "s3_url": s3_url,
             "policy_type": policy_type,
             "bank_id": bank_id,
             "container_id": container_id,
+            "version": version,
             "steps": {},
             "status": "in_progress"
         }
@@ -237,7 +245,14 @@ class UnderwritingWorkflow:
 
             print(f"✓ LLM generated {len(queries)} custom queries")
             for i, q in enumerate(queries, 1):
-                print(f"  {i}. {q}")
+                # Handle both old format (string) and new format (dict with query_text, page, clause)
+                if isinstance(q, dict):
+                    query_text = q.get('query_text', q)
+                    page_num = q.get('page_number', 'N/A')
+                    clause_ref = q.get('clause_reference', 'N/A')
+                    print(f"  {i}. {query_text} (Page: {page_num}, Clause: {clause_ref})")
+                else:
+                    print(f"  {i}. {q}")
 
             # Step 3: Extract structured data using AWS Textract
             print("\n" + "="*60)
@@ -248,11 +263,19 @@ class UnderwritingWorkflow:
                 raise ValueError("No extraction queries generated. Cannot proceed with data extraction.")
 
             print("Using AWS Textract for data extraction from S3...")
+            # Convert queries to simple strings for Textract (it only accepts text queries)
+            query_strings = []
+            for q in queries:
+                if isinstance(q, dict):
+                    query_strings.append(q.get('query_text', str(q)))
+                else:
+                    query_strings.append(str(q))
+
             # Use S3 document directly with Textract
             extracted_data = self.textract.analyze_document(
                 s3_bucket=s3_bucket,
                 s3_key=s3_key,
-                queries=queries
+                queries=query_strings
             )
 
             result["steps"]["data_extraction"] = {
@@ -269,18 +292,36 @@ class UnderwritingWorkflow:
                     print("Step 3.5: Saving extraction queries and responses to database...")
                     print("="*60)
 
-                    # Prepare queries data for database
+                    # Prepare queries data for database with page and clause information
                     queries_data = []
                     textract_queries = extracted_data.get('queries', {})
 
-                    for query_text in queries:
+                    for query_item in queries:
+                        # Handle both old format (string) and new format (dict)
+                        if isinstance(query_item, dict):
+                            query_text = query_item.get('query_text', str(query_item))
+                            page_number = query_item.get('page_number')
+                            clause_reference = query_item.get('clause_reference')
+                        else:
+                            query_text = str(query_item)
+                            page_number = None
+                            clause_reference = None
+
                         query_info = textract_queries.get(query_text, {})
-                        queries_data.append({
+                        query_data = {
                             'query_text': query_text,
                             'response_text': query_info.get('answer', ''),
                             'confidence_score': query_info.get('confidence', None),
                             'extraction_method': 'textract'
-                        })
+                        }
+
+                        # Add page and clause if available
+                        if page_number is not None:
+                            query_data['page_number'] = page_number
+                        if clause_reference:
+                            query_data['clause_reference'] = clause_reference
+
+                        queries_data.append(query_data)
 
                     # Save to database (use normalized IDs)
                     saved_query_ids = self.db_service.save_extraction_queries(
@@ -461,15 +502,96 @@ class UnderwritingWorkflow:
                         "message": str(e)
                     }
 
+            # Step 4.8: Generate test harness Excel file
+            if bank_id and policy_type and 'hierarchical_rules' in locals() and 'test_cases' in locals():
+                try:
+                    print("\n" + "="*60)
+                    print("Step 4.8: Generating test harness Excel file...")
+                    print("="*60)
+
+                    # Create temporary directory for test harness
+                    import tempfile
+                    temp_dir = tempfile.gettempdir()
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    harness_filename = f"{normalized_bank}_{normalized_type}_test_harness_{timestamp}.xlsx"
+                    harness_path = os.path.join(temp_dir, harness_filename)
+
+                    # Generate test harness
+                    self.test_harness_generator.generate_test_harness(
+                        hierarchical_rules=hierarchical_rules,
+                        test_cases=test_cases,
+                        bank_id=normalized_bank if bank_id else policy_type,
+                        policy_type=normalized_type,
+                        output_path=harness_path
+                    )
+
+                    # Read test harness file content
+                    with open(harness_path, 'rb') as f:
+                        harness_file_content = f.read()
+
+                    # Upload test harness to S3 in same folder as JAR/DRL/Excel artifacts
+                    # Use folder structure: generated-rules/{container_id}/{version}/
+                    s3_folder = f"generated-rules/{container_id}/{version}"
+                    harness_upload = self.s3_service.upload_file_to_s3(
+                        file_content=harness_file_content,
+                        filename=harness_filename,
+                        folder=s3_folder
+                    )
+
+                    if harness_upload.get("status") == "success":
+                        harness_s3_url = harness_upload.get("s3_url")
+                        print(f"✓ Test harness uploaded to S3: {harness_s3_url}")
+                        result["test_harness_s3_url"] = harness_s3_url
+
+                        # Generate pre-signed URL for test harness
+                        harness_presigned = self.s3_service.generate_presigned_url_from_s3_url(
+                            harness_s3_url,
+                            expiration=86400  # 24 hours
+                        )
+                        if harness_presigned:
+                            result["test_harness_presigned_url"] = harness_presigned
+                            print(f"✓ Generated pre-signed URL for test harness")
+
+                        result["steps"]["generate_test_harness"] = {
+                            "status": "success",
+                            "filename": harness_filename,
+                            "s3_url": harness_s3_url,
+                            "presigned_url": harness_presigned
+                        }
+                    else:
+                        print(f"✗ Test harness upload failed: {harness_upload.get('message', 'Unknown error')}")
+                        result["steps"]["generate_test_harness"] = {
+                            "status": "upload_error",
+                            "message": harness_upload.get('message', 'Unknown error')
+                        }
+
+                    # Clean up temporary file
+                    try:
+                        os.unlink(harness_path)
+                        print(f"✓ Temporary test harness file deleted: {harness_path}")
+                    except Exception as e:
+                        print(f"Warning: Could not delete temp test harness file: {e}")
+
+                except Exception as e:
+                    print(f"⚠ Failed to generate test harness: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    result["steps"]["generate_test_harness"] = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+
             # Step 5: Automated deployment to Drools KIE Server (includes DRL save)
             print("\n" + "="*60)
             print("Step 5: Automated deployment to Drools KIE Server...")
             print("="*60)
 
             # Try automated deployment (KJar creation, Maven build, deployment)
+            # Pass the version generated at the start of the workflow for consistency
             deployment_result = self.drools_deployment.deploy_rules_automatically(
                 rules['drl'],
-                container_id
+                container_id,
+                version=version
             )
             result["steps"]["deployment"] = deployment_result
 
@@ -494,7 +616,8 @@ class UnderwritingWorkflow:
 
                 jar_path = deployment_result["steps"]["build"].get("jar_path")
                 drl_path = deployment_result["steps"]["save_drl"].get("path")
-                version = deployment_result["release_id"]["version"]
+                # Use the version generated at the start of workflow (same as passed to deploy_rules_automatically)
+                # No need to re-assign: version = deployment_result["release_id"]["version"]
 
                 s3_upload_results = {}
 
@@ -614,7 +737,8 @@ class UnderwritingWorkflow:
                             s3_jar_url=result.get("jar_s3_url"),
                             s3_drl_url=result.get("drl_s3_url"),
                             s3_excel_url=result.get("excel_s3_url"),
-                            s3_policy_url=s3_url
+                            s3_policy_url=s3_url,
+                            s3_test_harness_url=result.get("test_harness_s3_url")
                         )
                         print(f"✓ Updated container {container_id} in database with S3 URLs")
                     else:
