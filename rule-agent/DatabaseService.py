@@ -1620,6 +1620,127 @@ class DatabaseService:
                 'last_execution_at': row[12].isoformat() if row[12] else None
             } for row in rows]
 
+    #  ==================== TEST EXECUTION METHODS ====================
+
+    def save_test_execution(self, execution_data: Dict[str, Any]) -> int:
+        """
+        Save a test execution result to the database
+
+        Args:
+            execution_data: Dictionary with execution details
+
+        Returns:
+            ID of created execution record
+        """
+        with self.get_session() as session:
+            execution = TestCaseExecution(
+                test_case_id=execution_data['test_case_id'],
+                execution_id=execution_data['execution_id'],
+                container_id=execution_data.get('container_id'),
+                actual_decision=execution_data.get('actual_decision'),
+                actual_reasons=execution_data.get('actual_reasons', []),
+                actual_risk_category=execution_data.get('actual_risk_category'),
+                request_payload=execution_data.get('request_payload'),
+                response_payload=execution_data.get('response_payload'),
+                test_passed=execution_data.get('test_passed'),
+                pass_reason=execution_data.get('pass_reason'),
+                fail_reason=execution_data.get('fail_reason'),
+                execution_time_ms=execution_data.get('execution_time_ms'),
+                executed_at=execution_data.get('executed_at', datetime.utcnow()),
+                executed_by=execution_data.get('executed_by', 'system')
+            )
+
+            session.add(execution)
+            session.flush()
+            execution_id = execution.id
+            session.commit()
+
+            logger.info(f"Saved test execution {execution_id} for test case {execution_data['test_case_id']}")
+            return execution_id
+
+    def get_test_executions(self, test_case_id: int = None,
+                           container_id: str = None,
+                           limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get test execution history
+
+        Args:
+            test_case_id: Optional filter by test case
+            container_id: Optional filter by container
+            limit: Maximum number of records to return
+
+        Returns:
+            List of execution dictionaries
+        """
+        with self.get_session() as session:
+            query = session.query(TestCaseExecution)
+
+            if test_case_id:
+                query = query.filter_by(test_case_id=test_case_id)
+
+            if container_id:
+                query = query.filter_by(container_id=container_id)
+
+            executions = query.order_by(TestCaseExecution.executed_at.desc()).limit(limit).all()
+
+            return [{
+                'id': e.id,
+                'test_case_id': e.test_case_id,
+                'execution_id': e.execution_id,
+                'container_id': e.container_id,
+                'actual_decision': e.actual_decision,
+                'actual_reasons': e.actual_reasons,
+                'actual_risk_category': e.actual_risk_category,
+                'test_passed': e.test_passed,
+                'pass_reason': e.pass_reason,
+                'fail_reason': e.fail_reason,
+                'execution_time_ms': e.execution_time_ms,
+                'executed_at': e.executed_at.isoformat() if e.executed_at else None,
+                'executed_by': e.executed_by
+            } for e in executions]
+
+    def get_test_cases_raw(self, bank_id: str, policy_type: str, is_active: bool = True):
+        """
+        Get test case model objects (not dictionaries) for test execution
+
+        Args:
+            bank_id: Bank identifier
+            policy_type: Policy type identifier
+            is_active: Filter by active status
+
+        Returns:
+            List of TestCase model objects
+        """
+        with self.get_session() as session:
+            test_cases = session.query(TestCase).filter_by(
+                bank_id=bank_id,
+                policy_type_id=policy_type,
+                is_active=is_active
+            ).order_by(TestCase.priority, TestCase.created_at).all()
+
+            # Detach from session to avoid lazy loading issues
+            session.expunge_all()
+            return test_cases
+
+    def get_container(self, container_id: str):
+        """
+        Get container by ID
+
+        Args:
+            container_id: Container identifier
+
+        Returns:
+            RuleContainer model object or None
+        """
+        with self.get_session() as session:
+            container = session.query(RuleContainer).filter_by(
+                container_id=container_id
+            ).first()
+
+            if container:
+                session.expunge(container)
+            return container
+
     def delete_test_case(self, test_case_id: int) -> bool:
         """
         Soft delete a test case (sets is_active to False)

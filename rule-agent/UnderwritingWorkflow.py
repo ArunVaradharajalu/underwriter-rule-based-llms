@@ -24,6 +24,8 @@ from S3Service import S3Service
 from ExcelRulesExporter import ExcelRulesExporter
 from DatabaseService import get_database_service
 from DocumentExtractor import DocumentExtractor
+from DynamicSchemaGenerator import DynamicSchemaGenerator
+from IntelligentFieldMapper import IntelligentFieldMapper
 from PyPDF2 import PdfReader
 import json
 import os
@@ -49,7 +51,12 @@ class UnderwritingWorkflow:
         self.llm = llm
         self.policy_analyzer = PolicyAnalyzerAgent(llm)
         self.textract = TextractService()
-        self.rule_generator = RuleGeneratorAgent(llm)
+
+        # Dynamic schema components (fully document-driven)
+        self.schema_generator = DynamicSchemaGenerator(llm)
+        self.field_mapper = IntelligentFieldMapper(llm)
+
+        self.rule_generator = RuleGeneratorAgent(llm)  # Will receive schema dynamically
         self.hierarchical_rules_agent = HierarchicalRulesAgent(llm)
         self.test_case_generator = TestCaseGenerator(llm)
         self.test_harness_generator = TestHarnessGenerator()
@@ -285,6 +292,66 @@ class UnderwritingWorkflow:
             }
             print(f"✓ Extracted data from {len(queries)} queries using AWS Textract")
 
+            # Step 3.3: Generate dynamic schema from policy document
+            print("\n" + "="*60)
+            print("Step 3.3: Generating dynamic schema from policy document...")
+            print("="*60)
+
+            try:
+                # Generate schema with LLM analyzing the policy document
+                dynamic_schema = self.schema_generator.generate_schema_from_policy(
+                    policy_text=document_text,
+                    extracted_queries=queries,
+                    policy_type=policy_type
+                )
+
+                # Update the field mapper with the schema
+                self.field_mapper.update_schema(dynamic_schema)
+
+                # Update the rule generator with the schema
+                self.rule_generator.update_schema(dynamic_schema)
+
+                # Log the schema for verification
+                applicant_field_count = len(dynamic_schema.get('applicant_fields', []))
+                policy_field_count = len(dynamic_schema.get('policy_fields', []))
+                mapping_count = len(dynamic_schema.get('field_mappings', {}))
+
+                print(f"✓ Generated dynamic schema:")
+                print(f"  - {applicant_field_count} applicant fields")
+                print(f"  - {policy_field_count} policy fields")
+                print(f"  - {mapping_count} field mappings")
+
+                # Print field details
+                print("\n  Applicant fields:")
+                for field in dynamic_schema.get('applicant_fields', [])[:5]:  # Show first 5
+                    print(f"    - {field['field_name']} ({field['field_type']}): {field.get('description', '')[:50]}")
+                if applicant_field_count > 5:
+                    print(f"    ... and {applicant_field_count - 5} more")
+
+                print("\n  Policy fields:")
+                for field in dynamic_schema.get('policy_fields', [])[:5]:  # Show first 5
+                    print(f"    - {field['field_name']} ({field['field_type']}): {field.get('description', '')[:50]}")
+                if policy_field_count > 5:
+                    print(f"    ... and {policy_field_count - 5} more")
+
+                result["steps"]["schema_generation"] = {
+                    "status": "success",
+                    "applicant_fields": applicant_field_count,
+                    "policy_fields": policy_field_count,
+                    "field_mappings": mapping_count,
+                    "schema": dynamic_schema
+                }
+
+            except Exception as e:
+                print(f"⚠ Failed to generate dynamic schema: {e}")
+                print(f"  Continuing with default schema...")
+                result["steps"]["schema_generation"] = {
+                    "status": "error",
+                    "error": str(e),
+                    "fallback": "using_default_schema"
+                }
+                # The RuleGeneratorAgent will use its fallback minimal schema
+
             # Step 3.5: Save extraction queries and Textract responses to database
             if bank_id and policy_type:
                 try:
@@ -351,14 +418,40 @@ class UnderwritingWorkflow:
             print("Step 4: Generating Drools rules...")
             print("="*60)
 
+            # Check if we have meaningful extracted data
+            # Handle case where extracted_data might be a string (error case) or dict
+            queries_with_answers = 0
+            if isinstance(extracted_data, dict):
+                queries_dict = extracted_data.get('queries', {})
+                if isinstance(queries_dict, dict):
+                    queries_with_answers = sum(1 for q_data in queries_dict.values() if q_data.get('answer'))
+                print(f"DEBUG: Queries with answers: {queries_with_answers}/{len(queries_dict)}")
+            else:
+                print(f"DEBUG: extracted_data is not a dict (type: {type(extracted_data).__name__}), cannot count answers")
+
+            if queries_with_answers == 0:
+                print("⚠ WARNING: No query answers found from Textract. DRL generation may be limited.")
+                print("  Falling back to hierarchical rules only (will be generated in next step)")
+
             rules = self.rule_generator.generate_rules(extracted_data)
+            drl_content = rules.get('drl', '')
+
+            # Check if DRL generation actually worked
+            is_empty_drl = drl_content in ["// No DRL rules generated", "// Error generating rules", ""]
+
             result["steps"]["rule_generation"] = {
-                "status": "success",
-                "drl_length": len(rules.get('drl', '')),
+                "status": "success" if not is_empty_drl else "limited",
+                "drl_length": len(drl_content),
                 "has_decision_table": rules.get('decision_table') is not None and len(rules.get('decision_table', '')) > 0,
-                "explanation": rules.get('explanation', '')
+                "explanation": rules.get('explanation', ''),
+                "queries_with_answers": queries_with_answers
             }
-            print(f"✓ Generated DRL rules ({len(rules.get('drl', ''))} characters)")
+
+            if is_empty_drl:
+                print(f"⚠ DRL generation produced minimal output ({len(drl_content)} characters)")
+                print(f"  This is likely due to limited Textract query responses")
+            else:
+                print(f"✓ Generated DRL rules ({len(drl_content)} characters)")
             if rules.get('decision_table'):
                 print(f"✓ Generated decision table")
 
@@ -475,6 +568,15 @@ class UnderwritingWorkflow:
                         )
 
                         print(f"✓ Generated and saved {len(saved_test_case_ids)} test cases")
+
+                        # Reload test cases from database to get IDs for Excel generation
+                        test_cases = self.db_service.get_test_cases(
+                            bank_id=normalized_bank,
+                            policy_type_id=normalized_type,
+                            is_active=True
+                        )
+                        print(f"✓ Reloaded {len(test_cases)} test cases with database IDs")
+
                         result["steps"]["generate_test_cases"] = {
                             "status": "success",
                             "count": len(saved_test_case_ids),
@@ -502,84 +604,8 @@ class UnderwritingWorkflow:
                         "message": str(e)
                     }
 
-            # Step 4.8: Generate test harness Excel file
-            if bank_id and policy_type and 'hierarchical_rules' in locals() and 'test_cases' in locals():
-                try:
-                    print("\n" + "="*60)
-                    print("Step 4.8: Generating test harness Excel file...")
-                    print("="*60)
-
-                    # Create temporary directory for test harness
-                    import tempfile
-                    temp_dir = tempfile.gettempdir()
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    harness_filename = f"{normalized_bank}_{normalized_type}_test_harness_{timestamp}.xlsx"
-                    harness_path = os.path.join(temp_dir, harness_filename)
-
-                    # Generate test harness
-                    self.test_harness_generator.generate_test_harness(
-                        hierarchical_rules=hierarchical_rules,
-                        test_cases=test_cases,
-                        bank_id=normalized_bank if bank_id else policy_type,
-                        policy_type=normalized_type,
-                        output_path=harness_path
-                    )
-
-                    # Read test harness file content
-                    with open(harness_path, 'rb') as f:
-                        harness_file_content = f.read()
-
-                    # Upload test harness to S3 in same folder as JAR/DRL/Excel artifacts
-                    # Use folder structure: generated-rules/{container_id}/{version}/
-                    s3_folder = f"generated-rules/{container_id}/{version}"
-                    harness_upload = self.s3_service.upload_file_to_s3(
-                        file_content=harness_file_content,
-                        filename=harness_filename,
-                        folder=s3_folder
-                    )
-
-                    if harness_upload.get("status") == "success":
-                        harness_s3_url = harness_upload.get("s3_url")
-                        print(f"✓ Test harness uploaded to S3: {harness_s3_url}")
-                        result["test_harness_s3_url"] = harness_s3_url
-
-                        # Generate pre-signed URL for test harness
-                        harness_presigned = self.s3_service.generate_presigned_url_from_s3_url(
-                            harness_s3_url,
-                            expiration=86400  # 24 hours
-                        )
-                        if harness_presigned:
-                            result["test_harness_presigned_url"] = harness_presigned
-                            print(f"✓ Generated pre-signed URL for test harness")
-
-                        result["steps"]["generate_test_harness"] = {
-                            "status": "success",
-                            "filename": harness_filename,
-                            "s3_url": harness_s3_url,
-                            "presigned_url": harness_presigned
-                        }
-                    else:
-                        print(f"✗ Test harness upload failed: {harness_upload.get('message', 'Unknown error')}")
-                        result["steps"]["generate_test_harness"] = {
-                            "status": "upload_error",
-                            "message": harness_upload.get('message', 'Unknown error')
-                        }
-
-                    # Clean up temporary file
-                    try:
-                        os.unlink(harness_path)
-                        print(f"✓ Temporary test harness file deleted: {harness_path}")
-                    except Exception as e:
-                        print(f"Warning: Could not delete temp test harness file: {e}")
-
-                except Exception as e:
-                    print(f"⚠ Failed to generate test harness: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    result["steps"]["generate_test_harness"] = {
-                        "status": "error",
-                        "message": str(e)
-                    }
+            # NOTE: Test harness generation moved to Step 8 (after test execution)
+            # This allows us to populate the Excel with actual test results
 
             # Step 5: Automated deployment to Drools KIE Server (includes DRL save)
             print("\n" + "="*60)
@@ -669,7 +695,8 @@ class UnderwritingWorkflow:
                         print(f"Warning: Could not delete temp DRL file: {e}")
 
                 # Generate and upload Excel spreadsheet with rules
-                if drl_content:
+                # Skip if DRL is empty or contains only fallback message
+                if drl_content and drl_content not in ["// No DRL rules generated", "// Error generating rules"]:
                     try:
                         print("✓ Generating Excel spreadsheet from rules...")
                         # Use container_id as fallback if bank_id is not provided
@@ -707,6 +734,12 @@ class UnderwritingWorkflow:
                             "status": "error",
                             "message": str(e)
                         }
+                else:
+                    print("⚠ Skipping Excel generation - DRL content is empty or contains only fallback message")
+                    s3_upload_results["excel"] = {
+                        "status": "skipped",
+                        "message": "No meaningful DRL rules to export"
+                    }
 
                 result["steps"]["s3_upload"] = s3_upload_results
 
@@ -749,6 +782,139 @@ class UnderwritingWorkflow:
                     print(f"⚠ Failed to update database: {db_error}")
                     # Don't fail the workflow for database errors
                     result["database_update_error"] = str(db_error)
+
+            # Step 7: Execute test cases against deployed rules
+            if bank_id and policy_type and container_id and deployment_result.get("status") == "success":
+                try:
+                    print("\n" + "="*60)
+                    print("Step 7: Executing test cases against deployed rules...")
+                    print("="*60)
+
+                    # Import TestExecutor
+                    from TestExecutor import TestExecutor
+
+                    # Create test executor with dynamic field mapper
+                    test_executor = TestExecutor(
+                        db_service=self.db_service,
+                        drools_service=None,  # Will use HTTP fallback
+                        field_mapper=self.field_mapper  # Use dynamic field mapping
+                    )
+
+                    # Execute all tests
+                    execution_summary = test_executor.execute_all_tests(
+                        bank_id=normalized_bank,
+                        policy_type=normalized_type,
+                        container_id=container_id
+                    )
+
+                    result["steps"]["test_execution"] = execution_summary
+                    print(f"✓ Test execution completed: {execution_summary.get('passed', 0)}/{execution_summary.get('total_cases', 0)} passed")
+
+                except Exception as e:
+                    print(f"⚠ Failed to execute test cases: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    result["steps"]["test_execution"] = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+
+            # Step 8: Generate test harness Excel file with actual test results
+            if bank_id and policy_type and 'hierarchical_rules' in locals() and 'test_cases' in locals():
+                try:
+                    print("\n" + "="*60)
+                    print("Step 8: Generating test harness Excel file with test results...")
+                    print("="*60)
+
+                    # Get test execution results from Step 7
+                    test_execution_results = execution_summary.get('results', []) if 'execution_summary' in locals() else None
+
+                    # Create temporary directory for test harness
+                    import tempfile
+                    temp_dir = tempfile.gettempdir()
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    harness_filename = f"{normalized_bank}_{normalized_type}_test_harness_{timestamp}.xlsx"
+                    harness_path = os.path.join(temp_dir, harness_filename)
+
+                    # Generate test harness with actual results
+                    self.test_harness_generator.generate_test_harness(
+                        hierarchical_rules=hierarchical_rules,
+                        test_cases=test_cases,
+                        bank_id=normalized_bank if bank_id else policy_type,
+                        policy_type=normalized_type,
+                        output_path=harness_path,
+                        test_execution_results=test_execution_results  # Pass actual results
+                    )
+
+                    # Small delay to ensure file is completely written
+                    import time
+                    time.sleep(0.5)
+
+                    # Verify file exists and has content
+                    if not os.path.exists(harness_path):
+                        raise FileNotFoundError(f"Test harness file not found: {harness_path}")
+
+                    file_size = os.path.getsize(harness_path)
+                    if file_size == 0:
+                        raise ValueError(f"Test harness file is empty: {harness_path}")
+
+                    print(f"✓ Test harness file ready ({file_size} bytes)")
+
+                    # Read test harness file content
+                    with open(harness_path, 'rb') as f:
+                        harness_file_content = f.read()
+
+                    # Upload test harness to S3 in same folder as JAR/DRL artifacts
+                    s3_folder = f"generated-rules/{container_id}/{version}"
+                    harness_upload = self.s3_service.upload_file_to_s3(
+                        file_content=harness_file_content,
+                        filename=harness_filename,
+                        folder=s3_folder
+                    )
+
+                    if harness_upload.get("status") == "success":
+                        harness_s3_url = harness_upload.get("s3_url")
+                        print(f"✓ Test harness uploaded to S3: {harness_s3_url}")
+                        result["test_harness_s3_url"] = harness_s3_url
+
+                        # Generate pre-signed URL for test harness
+                        harness_presigned = self.s3_service.generate_presigned_url_from_s3_url(
+                            harness_s3_url,
+                            expiration=86400  # 24 hours
+                        )
+                        if harness_presigned:
+                            result["test_harness_presigned_url"] = harness_presigned
+                            print(f"✓ Generated pre-signed URL for test harness")
+
+                        result["steps"]["generate_test_harness"] = {
+                            "status": "success",
+                            "filename": harness_filename,
+                            "s3_url": harness_s3_url,
+                            "presigned_url": harness_presigned,
+                            "with_results": test_execution_results is not None
+                        }
+                    else:
+                        print(f"✗ Test harness upload failed: {harness_upload.get('message', 'Unknown error')}")
+                        result["steps"]["generate_test_harness"] = {
+                            "status": "upload_error",
+                            "message": harness_upload.get('message', 'Unknown error')
+                        }
+
+                    # Clean up temporary file
+                    try:
+                        os.unlink(harness_path)
+                        print(f"✓ Temporary test harness file deleted: {harness_path}")
+                    except Exception as e:
+                        print(f"Warning: Could not delete temp test harness file: {e}")
+
+                except Exception as e:
+                    print(f"⚠ Failed to generate test harness: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    result["steps"]["generate_test_harness"] = {
+                        "status": "error",
+                        "message": str(e)
+                    }
 
             result["status"] = "completed"
             result["source"] = "generated"

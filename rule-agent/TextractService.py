@@ -167,6 +167,21 @@ class TextractService:
         # AWS Textract limit: Maximum 30 queries per API call
         MAX_QUERIES_PER_CALL = 30
 
+        # Deduplicate queries (case-insensitive, strip whitespace)
+        # AWS Textract rejects duplicate queries
+        original_count = len(queries)
+        seen = set()
+        deduplicated_queries = []
+        for q in queries:
+            normalized = q.strip().lower()
+            if normalized not in seen:
+                seen.add(normalized)
+                deduplicated_queries.append(q)
+
+        if len(deduplicated_queries) < original_count:
+            print(f"⚠ Removed {original_count - len(deduplicated_queries)} duplicate queries")
+            queries = deduplicated_queries
+
         # Check if batch processing is needed
         if len(queries) > MAX_QUERIES_PER_CALL:
             print(f"📊 Batch processing: {len(queries)} queries will be processed in batches of {MAX_QUERIES_PER_CALL}")

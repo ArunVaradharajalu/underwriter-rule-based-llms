@@ -14,12 +14,7 @@ class TestHarnessGenerator:
     """Generates Excel-based test harness with hierarchical rules and test cases"""
 
     def __init__(self):
-        self.wb = openpyxl.Workbook()
-        # Remove default sheet
-        if 'Sheet' in self.wb.sheetnames:
-            self.wb.remove(self.wb['Sheet'])
-
-        # Define color scheme
+        # Define color scheme (shared across all instances)
         self.colors = {
             'header': 'FFC000',      # Orange
             'pass': '92D050',        # Green
@@ -34,7 +29,8 @@ class TestHarnessGenerator:
                              test_cases: List[Dict[str, Any]],
                              bank_id: str,
                              policy_type: str,
-                             output_path: str) -> str:
+                             output_path: str,
+                             test_execution_results: List[Dict[str, Any]] = None) -> str:
         """
         Generate comprehensive test harness Excel file
 
@@ -44,25 +40,92 @@ class TestHarnessGenerator:
             bank_id: Bank identifier
             policy_type: Policy type identifier
             output_path: Path to save Excel file
+            test_execution_results: Optional list of test execution results to populate the Excel
 
         Returns:
             Path to generated file
         """
         print(f"📊 Generating test harness for {bank_id}/{policy_type}...")
+        print(f"DEBUG [TestHarness]: Input - hierarchical_rules: {len(hierarchical_rules)} rules, test_cases: {len(test_cases)} cases")
+
+        # Create a fresh workbook for each generation (prevents corruption from reuse)
+        self.wb = openpyxl.Workbook()
+        print(f"DEBUG [TestHarness]: Created new workbook, default sheets: {self.wb.sheetnames}")
+
+        # Note: Removed calculation mode setting as we're not using formulas anymore
+
+        # Remove default sheet
+        if 'Sheet' in self.wb.sheetnames:
+            self.wb.remove(self.wb['Sheet'])
+            print(f"DEBUG [TestHarness]: Removed default 'Sheet', remaining sheets: {self.wb.sheetnames}")
 
         # Flatten hierarchical rules for easier processing
         flattened_rules = self._flatten_rules(hierarchical_rules)
+        print(f"DEBUG [TestHarness]: Flattened {len(hierarchical_rules)} hierarchical rules to {len(flattened_rules)} total rules")
 
         # Create sheets
-        self._create_hierarchical_rules_sheet(hierarchical_rules, flattened_rules)
-        self._create_test_cases_sheet(test_cases)
-        self._create_execution_template_sheet(flattened_rules, test_cases)
-        self._create_coverage_summary_sheet(flattened_rules, test_cases)
-        self._create_instructions_sheet(bank_id, policy_type)
+        try:
+            print(f"DEBUG [TestHarness]: Creating sheet 1/5 - Hierarchical Rules...")
+            self._create_hierarchical_rules_sheet(hierarchical_rules, flattened_rules)
+            print(f"DEBUG [TestHarness]: ✓ Sheet 1/5 created successfully")
 
-        # Save workbook
-        self.wb.save(output_path)
-        print(f"✅ Test harness saved to: {output_path}")
+            print(f"DEBUG [TestHarness]: Creating sheet 2/5 - Test Cases...")
+            self._create_test_cases_sheet(test_cases)
+            print(f"DEBUG [TestHarness]: ✓ Sheet 2/5 created successfully")
+
+            print(f"DEBUG [TestHarness]: Creating sheet 3/5 - Test Execution...")
+            self._create_execution_template_sheet(flattened_rules, test_cases, test_execution_results)
+            print(f"DEBUG [TestHarness]: ✓ Sheet 3/5 created successfully")
+
+            print(f"DEBUG [TestHarness]: Creating sheet 4/5 - Coverage Summary...")
+            self._create_coverage_summary_sheet(flattened_rules, test_cases, test_execution_results)
+            print(f"DEBUG [TestHarness]: ✓ Sheet 4/5 created successfully")
+
+            print(f"DEBUG [TestHarness]: Creating sheet 5/5 - Instructions...")
+            self._create_instructions_sheet(bank_id, policy_type)
+            print(f"DEBUG [TestHarness]: ✓ Sheet 5/5 created successfully")
+
+            print(f"DEBUG [TestHarness]: All sheets created. Final sheet list: {self.wb.sheetnames}")
+        except Exception as e:
+            print(f"ERROR [TestHarness]: Failed during sheet creation: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
+        # Save workbook and ensure it's properly closed
+        try:
+            print(f"DEBUG [TestHarness]: Saving workbook to: {output_path}")
+            print(f"DEBUG [TestHarness]: Workbook has {len(self.wb.sheetnames)} sheets: {self.wb.sheetnames}")
+
+            # Important: Save without data_only to preserve formulas
+            self.wb.save(output_path)
+            print(f"DEBUG [TestHarness]: ✓ Workbook saved successfully")
+
+            # Explicitly close the workbook to flush all buffers
+            # Note: wb.close() may not exist in all openpyxl versions, so use try/except
+            try:
+                self.wb.close()
+                print(f"DEBUG [TestHarness]: ✓ Workbook closed successfully")
+            except AttributeError:
+                # Older versions of openpyxl don't have close()
+                print(f"DEBUG [TestHarness]: wb.close() not available (older openpyxl version)")
+                pass
+
+            # Verify file was created
+            import os
+            if os.path.exists(output_path):
+                file_size = os.path.getsize(output_path)
+                print(f"DEBUG [TestHarness]: ✓ File verified: {output_path} ({file_size} bytes)")
+            else:
+                print(f"ERROR [TestHarness]: File not found after save: {output_path}")
+
+            print(f"✅ Test harness saved to: {output_path}")
+        except Exception as e:
+            print(f"❌ ERROR [TestHarness]: Failed to save test harness: {e}")
+            print(f"ERROR [TestHarness]: Exception type: {type(e).__name__}")
+            import traceback
+            traceback.print_exc()
+            raise
 
         return output_path
 
@@ -183,9 +246,23 @@ class TestHarnessGenerator:
 
         ws.freeze_panes = 'A2'
 
-    def _create_execution_template_sheet(self, flattened_rules: List[Dict[str, Any]], test_cases: List[Dict[str, Any]]):
-        """Create Test Execution Template with automated pass/fail formulas"""
+    def _create_execution_template_sheet(self, flattened_rules: List[Dict[str, Any]], test_cases: List[Dict[str, Any]],
+                                        test_execution_results: List[Dict[str, Any]] = None):
+        """Create Test Execution Template with test results if available"""
         ws = self.wb.create_sheet("Test Execution")
+
+        # Create a lookup dictionary for test results by test_case_id
+        results_by_test_id = {}
+        if test_execution_results:
+            print(f"DEBUG [TestExecution]: Received {len(test_execution_results)} test results")
+            for result in test_execution_results:
+                test_case_id = result.get('test_case_id')
+                if test_case_id:
+                    results_by_test_id[test_case_id] = result
+                    print(f"DEBUG [TestExecution]: Mapped test_case_id={test_case_id} to result")
+            print(f"DEBUG [TestExecution]: Total mapped results: {len(results_by_test_id)}")
+        else:
+            print(f"DEBUG [TestExecution]: No test execution results provided")
 
         # Headers
         headers = ['Test ID', 'Rule ID', 'Rule Name', 'Expected', 'Actual Result',
@@ -196,6 +273,11 @@ class TestHarnessGenerator:
         row = 2
         for tc_idx, tc in enumerate(test_cases, start=1):
             test_id = f"TC{tc_idx:03d}"
+            test_case_id = tc.get('id')
+
+            # Get test execution result for this test case
+            test_result = results_by_test_id.get(test_case_id) if test_case_id else None
+            print(f"DEBUG [TestExecution]: Row {row}, Test {test_id}, test_case_id={test_case_id}, Found result: {test_result is not None}")
 
             for rule in flattened_rules:
                 ws.cell(row, 1, test_id)
@@ -203,26 +285,48 @@ class TestHarnessGenerator:
                 ws.cell(row, 3, rule['name'])
                 ws.cell(row, 4, rule['expected'])
 
-                # Actual Result - to be filled during execution
-                actual_cell = ws.cell(row, 5, '')
-                actual_cell.fill = PatternFill(start_color='FFFF00', fill_type='solid')
+                # Actual Result - populate from test results if available
+                if test_result:
+                    # Use actual decision as the result
+                    actual_value = test_result.get('actual_decision', '')
+                    actual_cell = ws.cell(row, 5, actual_value)
+                    actual_cell.fill = PatternFill(start_color='E2EFDA', fill_type='solid')  # Light green
+                else:
+                    actual_cell = ws.cell(row, 5, '')
+                    actual_cell.fill = PatternFill(start_color='FFFF00', fill_type='solid')  # Yellow
 
-                # Passed - Auto-calculated formula
-                # Formula: If E (actual) is empty, show "Pending", else compare D (expected) with E (actual)
-                passed_cell = ws.cell(row, 6)
-                passed_cell.value = f'=IF(E{row}="","Pending",IF(D{row}=E{row},"PASS","FAIL"))'
+                # Passed - populate from test results if available
+                if test_result:
+                    test_passed = test_result.get('test_passed')
+                    pass_status = 'PASS' if test_passed else 'FAIL'
+                    passed_cell = ws.cell(row, 6, pass_status)
 
-                # Conditional formatting based on formula result
-                # This will be evaluated when the file is opened in Excel
+                    # Color code based on pass/fail
+                    if test_passed:
+                        passed_cell.fill = PatternFill(start_color=self.colors['pass'], fill_type='solid')
+                    else:
+                        passed_cell.fill = PatternFill(start_color=self.colors['fail'], fill_type='solid')
+                        # Add fail reason to notes
+                        fail_reason = test_result.get('fail_reason', '')
+                        if fail_reason:
+                            ws.cell(row, 9, fail_reason)
+                else:
+                    passed_cell = ws.cell(row, 6, 'Pending')
+                    passed_cell.fill = PatternFill(start_color=self.colors['pending'], fill_type='solid')
 
                 # Execution Date
-                ws.cell(row, 7, '')
+                if test_result:
+                    exec_time = test_result.get('execution_time_ms', '')
+                    ws.cell(row, 7, f"{exec_time}ms" if exec_time else '')
+                else:
+                    ws.cell(row, 7, '')
 
                 # Executed By
-                ws.cell(row, 8, '')
+                ws.cell(row, 8, 'system' if test_result else '')
 
-                # Notes
-                ws.cell(row, 9, '')
+                # Notes already populated above for failures
+                if not test_result:
+                    ws.cell(row, 9, '')
 
                 row += 1
 
@@ -239,15 +343,31 @@ class TestHarnessGenerator:
 
         ws.freeze_panes = 'A2'
 
-    def _create_coverage_summary_sheet(self, flattened_rules: List[Dict[str, Any]], test_cases: List[Dict[str, Any]]):
+    def _create_coverage_summary_sheet(self, flattened_rules: List[Dict[str, Any]], test_cases: List[Dict[str, Any]],
+                                      test_execution_results: List[Dict[str, Any]] = None):
         """Create Coverage Summary sheet with statistics and charts"""
         ws = self.wb.create_sheet("Coverage Summary")
 
-        # Title
+        # Calculate actual counts from test results if available
+        total_executed = 0
+        passed_count = 0
+        failed_count = 0
+        if test_execution_results:
+            for result in test_execution_results:
+                total_executed += 1
+                if result.get('test_passed'):
+                    passed_count += 1
+                else:
+                    failed_count += 1
+
+        pending_count = len(flattened_rules) * len(test_cases) - total_executed if test_execution_results else len(flattened_rules) * len(test_cases)
+        pass_rate = (passed_count / total_executed * 100) if total_executed > 0 else 0.0
+
+        # Title (removed merge_cells to avoid Excel corruption)
         title_cell = ws.cell(1, 1, "Test Coverage Summary")
         title_cell.font = Font(size=16, bold=True, color='FFFFFF')
         title_cell.fill = PatternFill(start_color=self.colors['summary'], fill_type='solid')
-        ws.merge_cells('A1:B1')
+        # Note: Merged cells can cause Excel corruption, so avoiding ws.merge_cells()
 
         # Statistics
         row = 3
@@ -296,28 +416,29 @@ class TestHarnessGenerator:
         ws.cell(row, 1, "Execution Status").font = Font(bold=True, size=12)
         row += 1
 
-        # Formula to count PASS/FAIL/Pending from Test Execution sheet
+        # Execution status with actual counts from test results
         ws.cell(row, 1, "Total Executed")
-        ws.cell(row, 2, f'=COUNTIF(\'Test Execution\'!F:F,"PASS")+COUNTIF(\'Test Execution\'!F:F,"FAIL")')
+        ws.cell(row, 2, total_executed)
         row += 1
 
         ws.cell(row, 1, "Passed")
-        pass_cell = ws.cell(row, 2, f'=COUNTIF(\'Test Execution\'!F:F,"PASS")')
+        pass_cell = ws.cell(row, 2, passed_count)
         pass_cell.fill = PatternFill(start_color=self.colors['pass'], fill_type='solid')
         row += 1
 
         ws.cell(row, 1, "Failed")
-        fail_cell = ws.cell(row, 2, f'=COUNTIF(\'Test Execution\'!F:F,"FAIL")')
+        fail_cell = ws.cell(row, 2, failed_count)
         fail_cell.fill = PatternFill(start_color=self.colors['fail'], fill_type='solid')
         row += 1
 
         ws.cell(row, 1, "Pending")
-        pending_cell = ws.cell(row, 2, f'=COUNTIF(\'Test Execution\'!F:F,"Pending")')
+        pending_cell = ws.cell(row, 2, pending_count)
         pending_cell.fill = PatternFill(start_color=self.colors['pending'], fill_type='solid')
         row += 1
 
+        # Calculate pass rate percentage from actual results
         ws.cell(row, 1, "Pass Rate %")
-        ws.cell(row, 2, f'=IF(B{row-3}=0,0,ROUND(B{row-2}/B{row-3}*100,2))')
+        ws.cell(row, 2, round(pass_rate, 2))
 
         # Adjust column widths
         ws.column_dimensions['A'].width = 30
@@ -354,13 +475,13 @@ SHEETS DESCRIPTION
 
 3. TEST EXECUTION (MAIN WORKING SHEET)
    - Fill in "Actual Result" column (E) during test execution
-   - "Passed" column (F) auto-calculates: PASS if Expected = Actual, FAIL otherwise
+   - Manually update "Passed" column (F): Enter PASS if Expected = Actual, FAIL otherwise
    - Record execution date, tester name, and notes
-   - Color coding: Yellow = Pending, Green = Pass, Red = Fail
+   - Color coding: Yellow = Pending input needed
 
 4. COVERAGE SUMMARY
-   - Real-time statistics and test coverage metrics
-   - Auto-updates as you fill in test execution results
+   - Test coverage statistics and metrics
+   - Manually update execution counts based on test results
    - Shows pass/fail rates and execution progress
 
 HOW TO USE
@@ -381,7 +502,7 @@ STEP 3: Execute Tests
    - For each test case:
      a. Run the test with given input data
      b. Record the actual result in column E
-     c. "Passed" column will auto-calculate
+     c. Compare Expected (D) vs Actual (E) and enter PASS or FAIL in column F
      d. Fill in execution date and tester name
      e. Add notes for any issues or observations
 
@@ -396,14 +517,14 @@ TIPS
 - Test positive cases before negative cases
 - Document all failures with detailed notes
 - Update actual values exactly as shown in system output
-- Use formulas - they auto-calculate pass/fail status
+- Manually verify Expected vs Actual and mark PASS/FAIL consistently
 
-AUTOMATION
-----------
-The "Passed" column uses Excel formulas:
-  =IF(E2="","Pending",IF(D2=E2,"PASS","FAIL"))
-
-This automatically compares Expected (D) vs Actual (E) results.
+MANUAL VERIFICATION
+-------------------
+Compare the Expected (column D) vs Actual (column E) values:
+- If they match exactly: Enter "PASS" in column F
+- If they don't match: Enter "FAIL" in column F
+- Update the Coverage Summary counts as you complete tests
 
 For questions or issues, contact the testing team.
 """
@@ -433,3 +554,96 @@ For questions or issues, contact the testing team.
                 top=Side(style='thin'),
                 bottom=Side(style='thin')
             )
+
+    def update_excel_with_test_results(self,
+                                       excel_path: str,
+                                       test_execution_results: List[Dict[str, Any]]) -> str:
+        """
+        Update existing Excel file with test execution results
+
+        Args:
+            excel_path: Path to existing Excel file
+            test_execution_results: List of test execution results from TestExecutor
+
+        Returns:
+            Path to updated Excel file
+        """
+        print(f"Updating Excel file with test results: {excel_path}")
+
+        # Load existing workbook
+        wb = openpyxl.load_workbook(excel_path)
+
+        if "Test Execution" not in wb.sheetnames:
+            print("  ⚠ Warning: 'Test Execution' sheet not found in workbook")
+            wb.close()
+            return excel_path
+
+        ws = wb["Test Execution"]
+
+        # Build lookup by test_case_id (same as generate_test_harness method)
+        results_by_case_id = {}
+        for result in test_execution_results:
+            test_case_id = result.get('test_case_id')
+            if test_case_id:
+                results_by_case_id[test_case_id] = result
+
+        print(f"  Found {len(results_by_case_id)} test results to update")
+
+        # Build test ID to result mapping by reading Test Cases sheet
+        test_id_to_result = {}
+        if "Test Cases" in wb.sheetnames:
+            tc_ws = wb["Test Cases"]
+            for tc_row in range(2, tc_ws.max_row + 1):
+                test_id = tc_ws.cell(tc_row, 1).value  # Column A: Test ID (TC001, TC002, etc.)
+
+                # Find matching result by test case name
+                test_name = tc_ws.cell(tc_row, 2).value  # Column B: Test Name
+                for result in test_execution_results:
+                    if result.get('test_case_name') == test_name:
+                        test_id_to_result[test_id] = result
+                        break
+
+        # Update each row in Test Execution sheet
+        updated_count = 0
+        for row in range(2, ws.max_row + 1):
+            test_id = ws.cell(row, 1).value
+
+            if test_id and test_id in test_id_to_result:
+                result = test_id_to_result[test_id]
+
+                # Column E: Actual Result
+                actual_decision = result.get('actual_decision', '')
+                actual_cell = ws.cell(row, 5, actual_decision)
+                actual_cell.fill = PatternFill(start_color='E2EFDA', fill_type='solid')
+
+                # Column F: Passed
+                test_passed = result.get('test_passed', False)
+                pass_status = 'PASS' if test_passed else 'FAIL'
+                passed_cell = ws.cell(row, 6, pass_status)
+
+                if test_passed:
+                    passed_cell.fill = PatternFill(start_color=self.colors['pass'], fill_type='solid')
+                else:
+                    passed_cell.fill = PatternFill(start_color=self.colors['fail'], fill_type='solid')
+
+                # Column G: Execution Date
+                execution_time = result.get('execution_time_ms', '')
+                ws.cell(row, 7, f"{execution_time}ms" if execution_time else '')
+
+                # Column H: Executed By
+                ws.cell(row, 8, 'system')
+
+                # Column I: Notes (fail reason)
+                fail_reason = result.get('fail_reason', '')
+                if fail_reason and not test_passed:
+                    ws.cell(row, 9, fail_reason)
+
+                updated_count += 1
+
+        # Save updated workbook
+        wb.save(excel_path)
+        wb.close()
+
+        print(f"  ✓ Excel file updated: {updated_count} rows updated with test results")
+
+        return excel_path

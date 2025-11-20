@@ -26,7 +26,8 @@ class JavaPojoGenerator:
         'long': 'long',
         'Long': 'Long',
         'float': 'float',
-        'Float': 'Float'
+        'Float': 'Float',
+        'Date': 'java.util.Date'
     }
 
     def __init__(self, java_home: str = None):

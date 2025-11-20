@@ -362,17 +362,14 @@ class S3Service:
         try:
             # Sanitize filename to prevent path traversal
             safe_filename = os.path.basename(filename).replace(' ', '_')
-            
-            # Create timestamp-based folder structure: folder/YYYY-MM-DD/filename
-            date_folder = datetime.now().strftime("%Y-%m-%d")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
+
             # Add timestamp to filename to prevent overwrites
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             name, ext = os.path.splitext(safe_filename)
             timestamped_filename = f"{name}_{timestamp}{ext}"
-            
-            # Construct S3 key: folder/YYYY-MM-DD/filename_timestamp.ext
-            s3_key = f"{folder}/{date_folder}/{timestamped_filename}"
+
+            # Construct S3 key: folder/filename_timestamp.ext (no date subfolder)
+            s3_key = f"{folder}/{timestamped_filename}"
             
             # Determine content type based on file extension
             content_type = self._get_content_type(safe_filename)
@@ -385,8 +382,7 @@ class S3Service:
                 ContentType=content_type,
                 Metadata={
                     'original-filename': safe_filename,
-                    'upload-timestamp': timestamp,
-                    'upload-date': date_folder
+                    'upload-timestamp': timestamp
                 }
             )
             

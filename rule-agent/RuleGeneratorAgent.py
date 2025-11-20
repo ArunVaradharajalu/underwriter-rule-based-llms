@@ -25,8 +25,9 @@ class RuleGeneratorAgent:
     Converts extracted policy data into Drools rules (DRL format and decision tables)
     """
 
-    def __init__(self, llm):
+    def __init__(self, llm, schema: Dict = None):
         self.llm = llm
+        self.schema = schema  # Dynamic schema from DynamicSchemaGenerator
 
         self.rule_generation_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are an expert in insurance underwriting rules and Drools rule engine, specializing in multi-level dependency rules.
@@ -450,6 +451,98 @@ Generate complete, self-contained Drools DRL rules with 'declare' statements for
 
         self.chain = self.rule_generation_prompt | self.llm
 
+    def update_schema(self, schema: Dict):
+        """Update the dynamic schema"""
+        self.schema = schema
+
+    def _generate_dynamic_declare_statements(self) -> str:
+        """
+        Generate Drools declare statements from dynamic schema
+
+        Returns:
+            String containing declare statements for Applicant, Policy, and Decision
+        """
+        if not self.schema:
+            # Fallback to minimal schema if none provided
+            return """// Using minimal fallback schema
+declare Applicant
+    name: String
+    age: int
+end
+
+declare Policy
+    policyType: String
+end
+
+declare Decision
+    decision: String
+    approved: boolean
+    reasons: java.util.List
+    riskCategory: int
+end
+"""
+
+        drl = "// Dynamically generated schema from policy document\n\n"
+
+        # Generate Applicant declaration
+        if self.schema.get('applicant_fields'):
+            drl += "declare Applicant\n"
+            for field in self.schema['applicant_fields']:
+                field_name = field['field_name']
+                field_type = field['field_type']
+                description = field.get('description', '')
+                drl += f"    {field_name}: {field_type}  // {description}\n"
+            drl += "end\n\n"
+
+        # Generate Policy declaration
+        if self.schema.get('policy_fields'):
+            drl += "declare Policy\n"
+            for field in self.schema['policy_fields']:
+                field_name = field['field_name']
+                field_type = field['field_type']
+                description = field.get('description', '')
+                drl += f"    {field_name}: {field_type}  // {description}\n"
+            drl += "end\n\n"
+
+        # Always include intermediate fact types (for multi-level rule dependencies)
+        drl += """// Intermediate fact types for multi-level dependencies
+declare CreditTier
+    tier: String  // "A" (750+), "B" (700-749), "C" (600-699)
+end
+
+declare AgeBracket
+    bracket: String  // "young" (18-35), "middle" (36-50), "senior" (51-65)
+end
+
+declare RiskPoints
+    factor: String  // "credit", "age", "health", "smoking", "dti", "occupation"
+    points: int
+end
+
+declare RiskCategory
+    category: int  // 1 (low) through 5 (very high)
+    totalPoints: int
+end
+
+declare ApprovalStatus
+    stage: String  // "primary", "financial", "risk", "final"
+    passed: boolean
+    reason: String
+end
+
+// Final decision type with comprehensive fields
+declare Decision
+    decision: String
+    approved: boolean
+    reasons: java.util.List
+    riskCategory: int
+    requiresManualReview: boolean
+    premiumMultiplier: double
+end
+"""
+
+        return drl
+
     def generate_rules(self, extracted_data: Dict) -> Dict[str, str]:
         """
         Generate Drools rules from extracted data
@@ -458,16 +551,69 @@ Generate complete, self-contained Drools DRL rules with 'declare' statements for
         :return: Dictionary with 'drl', 'decision_table', and 'explanation' keys
         """
         try:
+            # Generate dynamic schema declarations if schema is available
+            schema_declarations = self._generate_dynamic_declare_statements()
+
+            # Add schema information to the prompt context
+            schema_context = ""
+            if self.schema:
+                schema_context = "\n\nDYNAMIC SCHEMA INFORMATION:\n"
+                schema_context += "The following fields have been extracted from the policy document:\n\n"
+                schema_context += "Applicant fields:\n"
+                for field in self.schema.get('applicant_fields', []):
+                    schema_context += f"  - {field['field_name']} ({field['field_type']}): {field.get('description', '')}\n"
+                schema_context += "\nPolicy fields:\n"
+                for field in self.schema.get('policy_fields', []):
+                    schema_context += f"  - {field['field_name']} ({field['field_type']}): {field.get('description', '')}\n"
+                schema_context += "\nUSE THESE EXACT FIELD NAMES in your rules. The declare statements will be added automatically.\n"
+
             result = self.chain.invoke({
-                "extracted_data": json.dumps(extracted_data, indent=2)
+                "extracted_data": json.dumps(extracted_data, indent=2) + schema_context
             })
 
             # Parse LLM response to extract DRL and CSV
             content = result.content
 
+            # Debug: Log LLM response for troubleshooting
+            print(f"\n===== DEBUG: LLM Response for Rule Generation =====")
+            print(f"Response length: {len(content)} characters")
+            print(f"Response preview (first 500 chars):\n{content[:500]}")
+            print(f"Response preview (last 500 chars):\n{content[-500:]}")
+            print(f"===== END DEBUG =====\n")
+
             # Extract DRL (between ```drl or ```java and ```)
-            drl = self._extract_code_block(content, 'drl') or \
-                  self._extract_code_block(content, 'java')
+            drl_rules = self._extract_code_block(content, 'drl') or \
+                        self._extract_code_block(content, 'java')
+
+            print(f"DEBUG: Extracted DRL rules: {drl_rules[:200] if drl_rules else 'None'}")
+
+            # If DRL was generated, prepend dynamic schema and ensure package statement
+            if drl_rules:
+                # Remove any existing declare statements from LLM output (we'll use our dynamic ones)
+                drl_rules = self._remove_declare_statements(drl_rules)
+
+                # Ensure package statement at the top
+                if not drl_rules.startswith('package '):
+                    final_drl = "package com.underwriting.rules;\n\n"
+                else:
+                    final_drl = ""
+
+                # Add dynamic schema declarations
+                final_drl += schema_declarations + "\n"
+
+                print(f"DEBUG: Schema declarations length: {len(schema_declarations)} chars")
+                print(f"DEBUG: Schema preview: {schema_declarations[:500]}")
+
+                # Add the generated rules
+                final_drl += drl_rules
+
+                print(f"DEBUG: Final DRL length: {len(final_drl)} chars")
+                print(f"DEBUG: Final DRL contains 'CreditTier': {('CreditTier' in final_drl)}")
+                print(f"DEBUG: Final DRL contains 'AgeBracket': {('AgeBracket' in final_drl)}")
+
+                drl = final_drl
+            else:
+                drl = "// No DRL rules generated"
 
             # Extract CSV (between ```csv and ```)
             decision_table = self._extract_code_block(content, 'csv')
@@ -476,7 +622,7 @@ Generate complete, self-contained Drools DRL rules with 'declare' statements for
             explanation = self._extract_explanation(content)
 
             return {
-                'drl': drl or "// No DRL rules generated",
+                'drl': drl,
                 'decision_table': decision_table or "",
                 'explanation': explanation,
                 'raw_response': content
@@ -491,6 +637,44 @@ Generate complete, self-contained Drools DRL rules with 'declare' statements for
                 'raw_response': ""
             }
 
+    def _remove_declare_statements(self, drl: str) -> str:
+        """
+        Remove declare statements from DRL (we'll use our dynamic ones)
+        This prevents conflicts between LLM-generated and dynamic schema
+        """
+        import re
+        # Remove declare blocks (from 'declare TypeName' to 'end')
+        # Also remove ALL package statements (we'll add our own at the top)
+        lines = drl.split('\n')
+        result_lines = []
+        in_declare_block = False
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Skip ALL package statements (we add our own at the top)
+            if stripped.startswith('package '):
+                continue
+
+            # Check if entering a declare block
+            if stripped.startswith('declare '):
+                in_declare_block = True
+                continue
+
+            # Check if exiting a declare block
+            if in_declare_block and stripped == 'end':
+                in_declare_block = False
+                continue
+
+            # Skip lines inside declare blocks
+            if in_declare_block:
+                continue
+
+            # Keep all other lines
+            result_lines.append(line)
+
+        return '\n'.join(result_lines)
+
     def _extract_code_block(self, text: str, language: str) -> str:
         """Extract code block from markdown"""
         start_marker = f"```{language}"
@@ -504,7 +688,11 @@ Generate complete, self-contained Drools DRL rules with 'declare' statements for
         end = text.find(end_marker, start)
 
         if end == -1:
-            return None
+            # If no end marker found, the response may be truncated
+            # Extract everything from start to end of text
+            print(f"WARNING: No closing ``` marker found for {language} code block")
+            print(f"         Extracting from position {start} to end of response")
+            return text[start:].strip()
 
         return text[start:end].strip()
 
