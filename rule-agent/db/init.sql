@@ -39,7 +39,7 @@ CREATE TABLE rule_containers (
     policy_type_id VARCHAR(50) REFERENCES policy_types(policy_type_id) ON DELETE CASCADE,
 
     -- Container details
-    platform VARCHAR(20) CHECK (platform IN ('docker', 'kubernetes', 'local')) NOT NULL,
+    platform VARCHAR(20) NOT NULL CHECK (platform IN ('docker', 'kubernetes', 'local')),
     container_name VARCHAR(255),
     endpoint VARCHAR(500) NOT NULL,
     port INTEGER,
@@ -70,14 +70,11 @@ CREATE TABLE rule_containers (
     -- Timestamps
     deployed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    stopped_at TIMESTAMP,
-
-    -- Ensure only one active container per bank+policy combination
-    CONSTRAINT unique_active_container UNIQUE (bank_id, policy_type_id, is_active)
-        DEFERRABLE INITIALLY DEFERRED
+    stopped_at TIMESTAMP
 );
 
--- Create partial unique index (PostgreSQL doesn't allow WHERE in constraint)
+-- Create partial unique index to ensure only one active container per bank+policy combination
+-- Note: This replaces the table constraint which incorrectly included is_active in the unique constraint
 CREATE UNIQUE INDEX idx_unique_active_container
     ON rule_containers(bank_id, policy_type_id)
     WHERE is_active = true;
@@ -442,48 +439,28 @@ CREATE TRIGGER update_rule_containers_updated_at BEFORE UPDATE ON rule_container
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- Trigger for extracted_rules updated_at (Migration 001)
-CREATE OR REPLACE FUNCTION update_extracted_rules_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
+-- Uses the shared update_updated_at_column() function
 DROP TRIGGER IF EXISTS trigger_update_extracted_rules_timestamp ON extracted_rules;
 CREATE TRIGGER trigger_update_extracted_rules_timestamp
     BEFORE UPDATE ON extracted_rules
     FOR EACH ROW
-    EXECUTE FUNCTION update_extracted_rules_updated_at();
+    EXECUTE FUNCTION update_updated_at_column();
 
 -- Trigger for policy_extraction_queries updated_at (Migration 002)
-CREATE OR REPLACE FUNCTION update_extraction_queries_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
+-- Uses the shared update_updated_at_column() function
 DROP TRIGGER IF EXISTS trigger_update_extraction_queries_timestamp ON policy_extraction_queries;
 CREATE TRIGGER trigger_update_extraction_queries_timestamp
     BEFORE UPDATE ON policy_extraction_queries
     FOR EACH ROW
-    EXECUTE FUNCTION update_extraction_queries_updated_at();
+    EXECUTE FUNCTION update_updated_at_column();
 
 -- Trigger for hierarchical_rules updated_at (Migration 003)
-CREATE OR REPLACE FUNCTION update_hierarchical_rules_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER IF NOT EXISTS hierarchical_rules_updated_at
+-- Uses the shared update_updated_at_column() function
+DROP TRIGGER IF EXISTS hierarchical_rules_updated_at ON hierarchical_rules;
+CREATE TRIGGER hierarchical_rules_updated_at
     BEFORE UPDATE ON hierarchical_rules
     FOR EACH ROW
-    EXECUTE FUNCTION update_hierarchical_rules_updated_at();
+    EXECUTE FUNCTION update_updated_at_column();
 
 -- Trigger to log deployment history
 CREATE OR REPLACE FUNCTION log_container_deployment()
