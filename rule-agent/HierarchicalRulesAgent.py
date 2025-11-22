@@ -34,30 +34,28 @@ class HierarchicalRulesAgent:
 
 IMPORTANT INSTRUCTIONS:
 1. Create a tree structure with parent rules and child dependencies
-2. Each rule should have:
+2. **LIMIT DEPTH TO 3 LEVELS MAXIMUM** (e.g., 1 → 1.1 → 1.1.1, then stop)
+3. **KEEP TOTAL RULES UNDER 20** - focus on the most important rules only
+4. Each rule should have:
    - id: Dot notation (e.g., "1", "1.1", "1.1.1")
-   - name: Brief descriptive name
-   - description: Detailed explanation of what the rule checks
-   - expected: What is expected (condition/requirement)
-   - actual: What would be checked/validated (leave as placeholder if not evaluating)
-   - confidence: Your confidence in extracting this rule (0.0 to 1.0)
-   - passed: null (will be determined during evaluation)
-   - page_number: Page number in the document where this rule is found (integer)
-   - clause_reference: Clause/section reference (e.g., "Article II, Section 2.1", "Clause 5.2")
-   - dependencies: Array of child rules (can be nested unlimited levels)
+   - name: Brief descriptive name (max 10 words)
+   - description: Brief explanation (max 20 words)
+   - expected: Brief condition (max 15 words)
+   - actual: "To be evaluated" (standard placeholder)
+   - confidence: 0.9 (use fixed value to save tokens)
+   - passed: null
+   - page_number: Integer (estimate if unsure)
+   - clause_reference: Brief reference (e.g., "Art II, Sec 2.1")
+   - dependencies: Array of child rules (max 3 levels deep)
 
-3. Organize rules logically:
-   - Top-level rules should be major decision categories (e.g., "Eligibility Check", "Risk Assessment", "Coverage Calculation")
-   - Child rules should break down the parent into specific checks
-   - Use deep nesting where rules naturally depend on sub-checks
+5. Organize rules logically:
+   - Top-level: 4-6 major categories (e.g., "Eligibility", "Risk Assessment", "Coverage")
+   - Level 2: Key sub-checks (2-4 per parent)
+   - Level 3: Specific validations (1-3 per level 2)
 
-4. Use dot notation IDs that reflect the hierarchy:
-   - "1" = first top-level rule
-   - "1.1" = first child of rule 1
-   - "1.1.1" = first grandchild of rule 1.1
-   - etc.
+6. Use dot notation IDs that reflect the hierarchy
 
-5. Return ONLY valid JSON - no markdown, no explanation, no extra text.
+7. **CRITICAL**: Return ONLY valid JSON - no markdown, no explanation. Keep descriptions concise to avoid token limits.
 
 POLICY DOCUMENT:
 {policy_text[:15000]}
@@ -151,8 +149,25 @@ Generate comprehensive hierarchical rules now:"""
                 response_text = response_text[:-3]
             response_text = response_text.strip()
 
-            # Parse JSON response
-            hierarchical_rules = json.loads(response_text)
+            # Parse JSON response with error recovery
+            try:
+                hierarchical_rules = json.loads(response_text)
+            except json.JSONDecodeError as parse_error:
+                print(f"⚠ Initial JSON parse failed: {parse_error}")
+                print(f"⚠ Attempting to repair truncated JSON...")
+
+                # Try to repair truncated JSON
+                response_text = self._repair_truncated_json(response_text)
+
+                try:
+                    hierarchical_rules = json.loads(response_text)
+                    print(f"✓ Successfully repaired and parsed JSON")
+                except json.JSONDecodeError as e:
+                    # If repair fails, save the response for debugging and raise
+                    print(f"✗ JSON repair failed: {e}")
+                    print(f"Response preview (first 1000 chars): {response_text[:1000]}")
+                    print(f"Response preview (last 500 chars): {response_text[-500:]}")
+                    raise ValueError(f"LLM did not return valid JSON even after repair: {e}")
 
             # Validate structure
             if not isinstance(hierarchical_rules, list):
@@ -181,14 +196,95 @@ Generate comprehensive hierarchical rules now:"""
 
             return hierarchical_rules
 
-        except json.JSONDecodeError as e:
-            print(f"✗ Failed to parse LLM response as JSON: {e}")
-            print(f"Response was: {response_text[:500]}...")
-            raise ValueError(f"LLM did not return valid JSON: {e}")
-
         except Exception as e:
             print(f"✗ Error generating hierarchical rules: {e}")
             raise
+
+    def _repair_truncated_json(self, json_text: str) -> str:
+        """
+        Attempt to repair truncated JSON by closing open brackets/braces and strings
+
+        :param json_text: Potentially truncated JSON text
+        :return: Repaired JSON text
+        """
+        import re
+
+        # Find the last complete character
+        json_text = json_text.rstrip()
+
+        # Count open/close brackets and braces
+        open_brackets = json_text.count('[')
+        close_brackets = json_text.count(']')
+        open_braces = json_text.count('{')
+        close_braces = json_text.count('}')
+
+        # Check if we're in the middle of a string (odd number of quotes before last char)
+        # Find the last quote position
+        last_quote_pos = max(json_text.rfind('"'), json_text.rfind("'"))
+
+        if last_quote_pos > 0:
+            # Count quotes before this position
+            quotes_before = json_text[:last_quote_pos].count('"')
+
+            # If odd number of quotes, we're in an unterminated string
+            if quotes_before % 2 == 1:
+                print(f"⚠ Detected unterminated string at position {last_quote_pos}")
+
+                # Try to find a safe place to truncate
+                # Look backwards for the last complete JSON object
+                # Simple heuristic: find last "}," or last complete field
+
+                # Find the last complete property before the truncation
+                # Pattern: "field": "value" or "field": number or "field": {...}
+                safe_cutoff = max(
+                    json_text.rfind('},'),
+                    json_text.rfind('],'),
+                    json_text.rfind('",'),
+                    json_text.rfind(': null,'),
+                    json_text.rfind(': true,'),
+                    json_text.rfind(': false,')
+                )
+
+                if safe_cutoff > 0:
+                    print(f"⚠ Truncating JSON at safe position: {safe_cutoff}")
+                    json_text = json_text[:safe_cutoff + 1]  # Keep the comma
+
+                    # Recount after truncation
+                    open_brackets = json_text.count('[')
+                    close_brackets = json_text.count(']')
+                    open_braces = json_text.count('{')
+                    close_braces = json_text.count('}')
+
+        # Remove incomplete fields at the end (various patterns)
+        # Pattern 1: "field": (no value at all)
+        json_text = re.sub(r',\s*"[^"]*"\s*:\s*$', '', json_text)
+
+        # Pattern 2: "field": "incomplete_value (unterminated string)
+        json_text = re.sub(r',\s*"[^"]*"\s*:\s*"[^"]*$', '', json_text)
+
+        # Pattern 3: "field": { (incomplete object)
+        json_text = re.sub(r',\s*"[^"]*"\s*:\s*\{\s*$', '', json_text)
+
+        # Pattern 4: "field": [ (incomplete array)
+        json_text = re.sub(r',\s*"[^"]*"\s*:\s*\[\s*$', '', json_text)
+
+        # Pattern 5: "field":}  or "field":]  (missing value before close bracket)
+        json_text = re.sub(r'"[^"]*"\s*:\s*([}\]])', r'\1', json_text)
+
+        # Remove trailing commas before closing brackets
+        json_text = re.sub(r',\s*([}\]])', r'\1', json_text)
+
+        # Close unclosed braces
+        if open_braces > close_braces:
+            print(f"⚠ Closing {open_braces - close_braces} unclosed braces")
+            json_text += '}' * (open_braces - close_braces)
+
+        # Close unclosed brackets
+        if open_brackets > close_brackets:
+            print(f"⚠ Closing {open_brackets - close_brackets} unclosed brackets")
+            json_text += ']' * (open_brackets - close_brackets)
+
+        return json_text
 
     def validate_rule_structure(self, rule: Dict[str, Any]) -> bool:
         """

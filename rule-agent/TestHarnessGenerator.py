@@ -178,9 +178,21 @@ class TestHarnessGenerator:
             ws.cell(row, 7, rule['clause_reference'])
             ws.cell(row, 8, rule['confidence'])
 
-            # Status indicator
-            status_cell = ws.cell(row, 9, 'Pending')
-            status_cell.fill = PatternFill(start_color=self.colors['pending'], fill_type='solid')
+            # Status indicator - based on rule's passed field
+            passed = rule.get('passed')
+            if passed is True:
+                status = 'Pass'
+                status_color = self.colors['pass']
+            elif passed is False:
+                status = 'Fail'
+                status_color = self.colors['fail']
+            else:
+                # passed is None or not set - rule hasn't been evaluated yet
+                status = 'Pending'
+                status_color = self.colors['pending']
+            
+            status_cell = ws.cell(row, 9, status)
+            status_cell.fill = PatternFill(start_color=status_color, fill_type='solid')
 
             row += 1
 
@@ -204,7 +216,7 @@ class TestHarnessGenerator:
 
         # Headers
         headers = ['Test ID', 'Test Name', 'Category', 'Priority', 'Expected Decision',
-                   'Expected Risk', 'Applicant Data', 'Policy Data', 'Expected Reasons']
+                   'Applicant Data', 'Policy Data', 'Expected Reasons']
         self._write_header_row(ws, headers)
 
         # Data rows
@@ -224,12 +236,11 @@ class TestHarnessGenerator:
                 priority_cell.fill = PatternFill(start_color='FFC000', fill_type='solid')
 
             ws.cell(row, 5, tc.get('expected_decision', ''))
-            ws.cell(row, 6, tc.get('expected_risk_category', ''))
-            ws.cell(row, 7, json.dumps(tc.get('applicant_data', {}), indent=2))
-            ws.cell(row, 8, json.dumps(tc.get('policy_data', {}), indent=2))
+            ws.cell(row, 6, json.dumps(tc.get('applicant_data', {}), indent=2))
+            ws.cell(row, 7, json.dumps(tc.get('policy_data', {}), indent=2))
 
             reasons = tc.get('expected_reasons', [])
-            ws.cell(row, 9, '\n'.join(reasons) if isinstance(reasons, list) else str(reasons))
+            ws.cell(row, 8, '\n'.join(reasons) if isinstance(reasons, list) else str(reasons))
 
             row += 1
 
@@ -239,10 +250,9 @@ class TestHarnessGenerator:
         ws.column_dimensions['C'].width = 12
         ws.column_dimensions['D'].width = 10
         ws.column_dimensions['E'].width = 15
-        ws.column_dimensions['F'].width = 12
+        ws.column_dimensions['F'].width = 40
         ws.column_dimensions['G'].width = 40
-        ws.column_dimensions['H'].width = 40
-        ws.column_dimensions['I'].width = 50
+        ws.column_dimensions['H'].width = 50
 
         ws.freeze_panes = 'A2'
 
@@ -264,82 +274,100 @@ class TestHarnessGenerator:
         else:
             print(f"DEBUG [TestExecution]: No test execution results provided")
 
-        # Headers
-        headers = ['Test ID', 'Rule ID', 'Rule Name', 'Expected', 'Actual Result',
-                   'Passed', 'Execution Date', 'Executed By', 'Notes']
+        # Headers - One row per test case (not per rule)
+        headers = ['Test ID', 'Test Case Name', 'Expected Decision', 'Actual Decision', 
+                   'Expected Reasons', 'Actual Reasons', 'Result', 'Execution Time', 'Executed By', 'Notes']
         self._write_header_row(ws, headers)
 
-        # Generate rows for each test case x rule combination
+        # Generate ONE row per test case (not per rule)
         row = 2
         for tc_idx, tc in enumerate(test_cases, start=1):
             test_id = f"TC{tc_idx:03d}"
             test_case_id = tc.get('id')
-
+            test_case_name = tc.get('test_case_name', 'Unknown Test Case')
+            
             # Get test execution result for this test case
             test_result = results_by_test_id.get(test_case_id) if test_case_id else None
             print(f"DEBUG [TestExecution]: Row {row}, Test {test_id}, test_case_id={test_case_id}, Found result: {test_result is not None}")
 
-            for rule in flattened_rules:
-                ws.cell(row, 1, test_id)
-                ws.cell(row, 2, rule['id'])
-                ws.cell(row, 3, rule['name'])
-                ws.cell(row, 4, rule['expected'])
+            # Test ID
+            ws.cell(row, 1, test_id)
+            
+            # Test Case Name
+            ws.cell(row, 2, test_case_name)
+            
+            # Expected Decision
+            expected_decision = tc.get('expected_decision', '')
+            ws.cell(row, 3, expected_decision)
+            
+            # Actual Decision - populate from test results if available
+            if test_result:
+                actual_decision = test_result.get('actual_decision', '')
+                actual_cell = ws.cell(row, 4, actual_decision)
+                actual_cell.fill = PatternFill(start_color='E2EFDA', fill_type='solid')  # Light green
+            else:
+                actual_cell = ws.cell(row, 4, '')
+                actual_cell.fill = PatternFill(start_color='FFFF00', fill_type='solid')  # Yellow
+            
+            # Expected Reasons
+            expected_reasons = tc.get('expected_reasons', [])
+            ws.cell(row, 5, ', '.join(expected_reasons) if expected_reasons else 'None')
+            
+            # Actual Reasons
+            if test_result:
+                actual_reasons = test_result.get('actual_reasons', [])
+                ws.cell(row, 6, ', '.join(actual_reasons) if actual_reasons else 'None')
+            else:
+                ws.cell(row, 6, '')
+            
+            # Result (Passed/Failed) - populate from test results if available
+            if test_result:
+                test_passed = test_result.get('test_passed')
+                pass_status = 'PASS' if test_passed else 'FAIL'
+                passed_cell = ws.cell(row, 7, pass_status)
 
-                # Actual Result - populate from test results if available
-                if test_result:
-                    # Use actual decision as the result
-                    actual_value = test_result.get('actual_decision', '')
-                    actual_cell = ws.cell(row, 5, actual_value)
-                    actual_cell.fill = PatternFill(start_color='E2EFDA', fill_type='solid')  # Light green
+                # Color code based on pass/fail
+                if test_passed:
+                    passed_cell.fill = PatternFill(start_color=self.colors['pass'], fill_type='solid')
                 else:
-                    actual_cell = ws.cell(row, 5, '')
-                    actual_cell.fill = PatternFill(start_color='FFFF00', fill_type='solid')  # Yellow
+                    passed_cell.fill = PatternFill(start_color=self.colors['fail'], fill_type='solid')
+            else:
+                passed_cell = ws.cell(row, 7, 'Pending')
+                passed_cell.fill = PatternFill(start_color=self.colors['pending'], fill_type='solid')
 
-                # Passed - populate from test results if available
-                if test_result:
-                    test_passed = test_result.get('test_passed')
-                    pass_status = 'PASS' if test_passed else 'FAIL'
-                    passed_cell = ws.cell(row, 6, pass_status)
+            # Execution Time
+            if test_result:
+                exec_time = test_result.get('execution_time_ms', '')
+                ws.cell(row, 8, f"{exec_time}ms" if exec_time else '')
+            else:
+                ws.cell(row, 8, '')
 
-                    # Color code based on pass/fail
-                    if test_passed:
-                        passed_cell.fill = PatternFill(start_color=self.colors['pass'], fill_type='solid')
-                    else:
-                        passed_cell.fill = PatternFill(start_color=self.colors['fail'], fill_type='solid')
-                        # Add fail reason to notes
-                        fail_reason = test_result.get('fail_reason', '')
-                        if fail_reason:
-                            ws.cell(row, 9, fail_reason)
+            # Executed By
+            ws.cell(row, 9, 'system' if test_result else '')
+
+            # Notes - Add fail reason if test failed
+            if test_result and not test_result.get('test_passed'):
+                fail_reason = test_result.get('fail_reason', '')
+                if fail_reason:
+                    ws.cell(row, 10, fail_reason)
                 else:
-                    passed_cell = ws.cell(row, 6, 'Pending')
-                    passed_cell.fill = PatternFill(start_color=self.colors['pending'], fill_type='solid')
+                    ws.cell(row, 10, '')
+            else:
+                ws.cell(row, 12, '')
 
-                # Execution Date
-                if test_result:
-                    exec_time = test_result.get('execution_time_ms', '')
-                    ws.cell(row, 7, f"{exec_time}ms" if exec_time else '')
-                else:
-                    ws.cell(row, 7, '')
-
-                # Executed By
-                ws.cell(row, 8, 'system' if test_result else '')
-
-                # Notes already populated above for failures
-                if not test_result:
-                    ws.cell(row, 9, '')
-
-                row += 1
+            row += 1
 
         # Adjust column widths
-        ws.column_dimensions['A'].width = 10
-        ws.column_dimensions['B'].width = 12
-        ws.column_dimensions['C'].width = 35
-        ws.column_dimensions['D'].width = 30
-        ws.column_dimensions['E'].width = 30
-        ws.column_dimensions['F'].width = 10
-        ws.column_dimensions['G'].width = 15
-        ws.column_dimensions['H'].width = 15
-        ws.column_dimensions['I'].width = 40
+        ws.column_dimensions['A'].width = 10  # Test ID
+        ws.column_dimensions['B'].width = 40  # Test Case Name
+        ws.column_dimensions['C'].width = 20  # Expected Decision
+        ws.column_dimensions['D'].width = 20  # Actual Decision
+        ws.column_dimensions['E'].width = 50  # Expected Reasons
+        ws.column_dimensions['F'].width = 50  # Actual Reasons
+        ws.column_dimensions['G'].width = 12  # Result
+        ws.column_dimensions['H'].width = 15  # Execution Time
+        ws.column_dimensions['I'].width = 15  # Executed By
+        ws.column_dimensions['J'].width = 50  # Notes
 
         ws.freeze_panes = 'A2'
 
@@ -360,7 +388,8 @@ class TestHarnessGenerator:
                 else:
                     failed_count += 1
 
-        pending_count = len(flattened_rules) * len(test_cases) - total_executed if test_execution_results else len(flattened_rules) * len(test_cases)
+        # Calculate pending: total test cases minus executed test cases
+        pending_count = len(test_cases) - total_executed if test_execution_results else len(test_cases)
         pass_rate = (passed_count / total_executed * 100) if total_executed > 0 else 0.0
 
         # Title (removed merge_cells to avoid Excel corruption)
@@ -374,7 +403,7 @@ class TestHarnessGenerator:
         stats = [
             ('Total Rules', len(flattened_rules)),
             ('Total Test Cases', len(test_cases)),
-            ('Expected Total Test Executions', len(flattened_rules) * len(test_cases)),
+            ('Total Test Executions', len(test_cases)),  # One execution per test case
             ('', ''),
             ('Rules by Level', ''),
         ]
@@ -529,16 +558,19 @@ Compare the Expected (column D) vs Actual (column E) values:
 For questions or issues, contact the testing team.
 """
 
-        # Write instructions
+        # Write instructions - explicitly set as text to prevent formula interpretation
         row = 1
         for line in instructions.split('\n'):
-            ws.cell(row, 1, line)
+            cell = ws.cell(row, 1)
+            # Set as explicit string to prevent Excel from treating special chars as formulas
+            cell.value = str(line)
+            cell.data_type = 's'  # 's' = string type, prevents formula interpretation
             row += 1
 
         # Format
         ws.column_dimensions['A'].width = 100
-        for row in ws.iter_rows(min_row=1, max_row=row):
-            for cell in row:
+        for row_iter in ws.iter_rows(min_row=1, max_row=row):
+            for cell in row_iter:
                 cell.alignment = Alignment(wrap_text=True, vertical='top')
 
     def _write_header_row(self, ws, headers: List[str]):

@@ -32,17 +32,16 @@ def createLLMOpenAI():
         raise ValueError("OPENAI_API_KEY environment variable is required for OpenAI integration")
 
     model_name = os.getenv("OPENAI_MODEL_NAME", "gpt-4")
-    # Deterministic generation: temperature=0 (ignore env var for consistency)
-    temperature = 0.0
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.0"))
     max_tokens = os.getenv("OPENAI_MAX_TOKENS")
 
-    print(f"Creating OpenAI LLM with model: {model_name} (deterministic mode)")
+    print(f"Creating OpenAI LLM with model: {model_name}, temperature: {temperature}")
 
     llm_config = {
         "model_name": model_name,
         "openai_api_key": api_key,
-        "temperature": temperature,  # Always 0.0 for deterministic output
-        "seed": 42                    # Fixed seed for reproducibility (OpenAI supports this)
+        "temperature": temperature,
+        "seed": 42  # Fixed seed for reproducibility (OpenAI supports this)
     }
 
     if max_tokens:

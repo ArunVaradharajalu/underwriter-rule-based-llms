@@ -90,13 +90,18 @@ class DroolsService(RuleService):
                     print(f"✓ Routing to DEDICATED container: {container_id} at {endpoint}")
                     return endpoint, rulesetPath
                 else:
-                    print(f"⚠ Container {container_id} not found or unhealthy in registry")
-                    print(f"⚠ FALLBACK: Using shared Drools server at {self.server_url}")
-        except (ValueError, IndexError):
-            print(f"⚠ Could not extract container ID from path: {rulesetPath}")
+                    # Container not found - raise error instead of falling back
+                    error_msg = f"Container {container_id} not found or unhealthy in dedicated container registry"
+                    print(f"✗ {error_msg}")
+                    raise ValueError(error_msg)
+        except (ValueError, IndexError) as e:
+            # Could not extract container ID - raise error instead of falling back
+            error_msg = f"Could not extract container ID from path: {rulesetPath}"
+            print(f"✗ {error_msg}")
+            raise ValueError(error_msg)
 
-        # Fall back to default
-        return self.server_url, rulesetPath
+        # Should not reach here when orchestrator is enabled
+        raise ValueError(f"Unexpected path resolution failure for: {rulesetPath}")
 
     def invokeDecisionService(self, rulesetPath, decisionInputs):
         """

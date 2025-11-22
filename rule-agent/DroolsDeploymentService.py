@@ -654,17 +654,13 @@ Manual Deployment Steps:
                         print(f"⚠ Failed to create container: {orchestration_result.get('message')}")
 
             # Step 5: Deploy to KIE Server
-            # If orchestrator is enabled, deploy to BOTH main server and dedicated container
+            # If orchestrator is enabled, deploy ONLY to dedicated container (skip main server)
             if self.use_orchestrator and self.orchestrator:
-                # Deploy to main Drools server first (for backup/legacy compatibility)
-                print(f"Deploying to main Drools server...")
-                deploy_result = self.deploy_container(container_id, group_id, artifact_id, version)
-                result["steps"]["deploy_main"] = deploy_result
+                # Skip main Drools server deployment - only deploy to dedicated container
+                print(f"ℹ Skipping main Drools server deployment (orchestrator enabled)")
+                print(f"→ Deploying only to dedicated isolated container...")
 
-                if deploy_result["status"] == "success":
-                    print(f"✓ Deployed to main Drools server")
-
-                # Now deploy to the dedicated container
+                # Deploy to the dedicated container
                 print(f"\n{'='*80}")
                 print(f"DEBUG: Starting dedicated container deployment")
                 print(f"DEBUG: Container ID: {container_id}")
@@ -688,8 +684,8 @@ Manual Deployment Steps:
                     result["message"] = f"Rules deployed to dedicated container {dedicated_deploy_result.get('container_name')}"
                 else:
                     print(f"⚠ Failed to deploy to dedicated container: {dedicated_deploy_result.get('message')}")
-                    result["status"] = "partial"
-                    result["message"] = "Deployed to main server but failed to deploy to dedicated container"
+                    result["status"] = "failed"
+                    result["message"] = f"Failed to deploy to dedicated container: {dedicated_deploy_result.get('message')}"
 
                 print(f"{'='*80}\n")
 

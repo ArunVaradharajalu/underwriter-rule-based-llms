@@ -301,11 +301,19 @@ def test_rules():
     policy = data.get('policy', {})
 
     try:
+        # Get container endpoint from database (no fallback)
+        container = db_service.get_container(container_id)
+        if not container:
+            return jsonify({'error': f'Container {container_id} not found in database'}), 404
+
+        if not container.endpoint:
+            return jsonify({'error': f'Container {container_id} has no endpoint configured'}), 500
+
         # Execute rules via Drools KIE Server REST API
         import requests
         from requests.auth import HTTPBasicAuth
 
-        drools_url = os.getenv('DROOLS_SERVER_URL', 'http://drools:8080/kie-server/services/rest/server')
+        drools_url = f"{container.endpoint}/kie-server/services/rest/server"
         drools_user = os.getenv('DROOLS_USERNAME', 'kieserver')
         drools_password = os.getenv('DROOLS_PASSWORD', 'kieserver1!')
 

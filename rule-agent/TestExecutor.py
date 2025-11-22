@@ -23,16 +23,20 @@ class TestExecutor:
         Args:
             db_service: DatabaseService instance for storing execution results
             drools_service: DroolsService instance for executing rules
-            field_mapper: IntelligentFieldMapper instance for dynamic field mapping
+            field_mapper: IntelligentFieldMapper instance for dynamic field mapping (required)
         """
+        if field_mapper is None:
+            raise ValueError("IntelligentFieldMapper is required. field_mapper parameter must be provided.")
+        
         self.db_service = db_service
         self.drools_service = drools_service
-        self.field_mapper = field_mapper  # Dynamic field mapper
+        self.field_mapper = field_mapper  # Dynamic field mapper (required)
 
     def execute_all_tests(self,
                          bank_id: str,
                          policy_type: str,
-                         container_id: str) -> Dict[str, Any]:
+                         container_id: str,
+                         test_case_ids: list = None) -> Dict[str, Any]:
         """
         Execute all test cases for a given bank/policy type combination
 
@@ -40,17 +44,30 @@ class TestExecutor:
             bank_id: Bank identifier
             policy_type: Policy type identifier
             container_id: Drools container ID to execute against
+            test_case_ids: Optional list of specific test case IDs to execute (from current run)
 
         Returns:
             Dictionary with execution summary and results
         """
         print(f"\n{'='*60}")
-        print(f"Executing all test cases for {bank_id}/{policy_type}")
+        if test_case_ids:
+            print(f"Executing {len(test_case_ids)} test cases from CURRENT workflow run")
+        else:
+            print(f"Executing all test cases for {bank_id}/{policy_type}")
         print(f"Using container: {container_id}")
         print(f"{'='*60}")
 
-        # Get all test cases from database (model objects, not dicts)
-        test_cases = self.db_service.get_test_cases_raw(bank_id, policy_type)
+        # Get test cases from database
+        if test_case_ids:
+            # CRITICAL: Only execute test cases generated in the current workflow run
+            # get_test_cases_by_ids returns dictionaries, not model objects
+            test_cases = self.db_service.get_test_cases_by_ids(test_case_ids)
+            print(f"✓ Loaded {len(test_cases)} test cases from current workflow run")
+        else:
+            # Fallback: get all test cases (for backward compatibility)
+            # get_test_cases_raw returns model objects
+            test_cases = self.db_service.get_test_cases_raw(bank_id, policy_type)
+            print(f"⚠ Warning: Using all test cases from database (not filtered to current run)")
 
         if not test_cases:
             print("⚠ No test cases found in database")
@@ -72,7 +89,9 @@ class TestExecutor:
         error_count = 0
 
         for idx, test_case in enumerate(test_cases, 1):
-            print(f"\n[{idx}/{len(test_cases)}] Executing: {test_case.test_case_name}")
+            # Handle both dict and object access patterns
+            test_case_name = test_case.get('test_case_name') if isinstance(test_case, dict) else test_case.test_case_name
+            print(f"\n[{idx}/{len(test_cases)}] Executing: {test_case_name}")
 
             try:
                 execution_result = self._execute_single_test(
@@ -92,9 +111,12 @@ class TestExecutor:
             except Exception as e:
                 error_count += 1
                 print(f"  ⚠ ERROR: {str(e)}")
+                # Handle both dict and object access patterns
+                test_case_id = test_case.get('id') if isinstance(test_case, dict) else test_case.id
+                test_case_name = test_case.get('test_case_name') if isinstance(test_case, dict) else test_case.test_case_name
                 results.append({
-                    "test_case_id": test_case.id,
-                    "test_case_name": test_case.test_case_name,
+                    "test_case_id": test_case_id,
+                    "test_case_name": test_case_name,
                     "status": "error",
                     "error": str(e)
                 })
@@ -128,7 +150,7 @@ class TestExecutor:
         Execute a single test case
 
         Args:
-            test_case: TestCase database model instance
+            test_case: TestCase database model instance OR dictionary
             container_id: Drools container ID
 
         Returns:
@@ -137,18 +159,40 @@ class TestExecutor:
         execution_id = str(uuid.uuid4())
         start_time = time.time()
 
+        # Handle both dict and object access patterns
+        is_dict = isinstance(test_case, dict)
+        test_case_name = test_case.get('test_case_name') if is_dict else test_case.test_case_name
+        expected_decision = test_case.get('expected_decision') if is_dict else test_case.expected_decision
+        expected_risk_category = test_case.get('expected_risk_category') if is_dict else test_case.expected_risk_category
+        expected_reasons = test_case.get('expected_reasons') if is_dict else test_case.expected_reasons
+        applicant_data = test_case.get('applicant_data') if is_dict else test_case.applicant_data
+        policy_data = test_case.get('policy_data') if is_dict else test_case.policy_data
+        test_case_id = test_case.get('id') if is_dict else test_case.id
+
+        print(f"\n{'='*80}")
+        print(f"DEBUG: EXECUTING TEST CASE - {test_case_name}")
+        print(f"{'='*80}")
+        print(f"Expected Decision: {expected_decision}")
+        print(f"Expected Risk Category: {expected_risk_category}")
+        print(f"Expected Reasons: {expected_reasons}")
+        print(f"\nOriginal Applicant Data (before mapping):")
+        print(json.dumps(applicant_data, indent=2))
+        print(f"\nOriginal Policy Data (before mapping):")
+        print(json.dumps(policy_data, indent=2))
+
         # Prepare request payload for Drools
         # Insert facts and fire rules, then query for Decision object
         commands = []
 
         # Insert applicant if present
-        if test_case.applicant_data:
+        if applicant_data:
             # Map test data fields to Drools schema dynamically
-            if self.field_mapper:
-                applicant_mapped = self.field_mapper.map_applicant_data(test_case.applicant_data)
-            else:
-                # Fallback to legacy static mapping if no mapper available
-                applicant_mapped = self._map_applicant_data(test_case.applicant_data)
+            if not self.field_mapper:
+                raise ValueError("IntelligentFieldMapper is required. field_mapper must be provided to TestExecutor.")
+            
+            applicant_mapped = self.field_mapper.map_applicant_data(applicant_data)
+            print(f"\nMapped Applicant Data (after field mapping):")
+            print(json.dumps(applicant_mapped, indent=2))
 
             commands.append({
                 "insert": {
@@ -161,13 +205,14 @@ class TestExecutor:
             })
 
         # Insert policy if present
-        if test_case.policy_data:
+        if policy_data:
             # Map test data fields to Drools schema dynamically
-            if self.field_mapper:
-                policy_mapped = self.field_mapper.map_policy_data(test_case.policy_data)
-            else:
-                # Fallback to legacy static mapping if no mapper available
-                policy_mapped = self._map_policy_data(test_case.policy_data)
+            if not self.field_mapper:
+                raise ValueError("IntelligentFieldMapper is required. field_mapper must be provided to TestExecutor.")
+            
+            policy_mapped = self.field_mapper.map_policy_data(policy_data)
+            print(f"\nMapped Policy Data (after field mapping):")
+            print(json.dumps(policy_mapped, indent=2))
 
             commands.append({
                 "insert": {
@@ -232,18 +277,29 @@ class TestExecutor:
         actual_decision, actual_reasons, actual_risk = self._extract_results(response_payload)
 
         # Compare with expected results
+        print(f"\n{'='*80}")
+        print("DEBUG: COMPARING RESULTS")
+        print(f"{'='*80}")
+        print(f"Expected Decision: {expected_decision}")
+        print(f"Actual Decision: {actual_decision}")
+        print(f"Expected Risk Category: {expected_risk_category}")
+        print(f"Actual Risk Category: {actual_risk}")
+        print(f"Expected Reasons: {expected_reasons}")
+        print(f"Actual Reasons: {actual_reasons}")
+        print(f"{'='*80}")
+
         test_passed, pass_reason, fail_reason = self._compare_results(
-            expected_decision=test_case.expected_decision,
+            expected_decision=expected_decision,
             actual_decision=actual_decision,
-            expected_risk=test_case.expected_risk_category,
+            expected_risk=expected_risk_category,
             actual_risk=actual_risk,
-            expected_reasons=test_case.expected_reasons,
+            expected_reasons=expected_reasons,
             actual_reasons=actual_reasons
         )
 
         # Save execution to database
         execution_record = {
-            "test_case_id": test_case.id,
+            "test_case_id": test_case_id,
             "execution_id": execution_id,
             "container_id": container_id,
             "actual_decision": actual_decision,
@@ -263,13 +319,14 @@ class TestExecutor:
         self.db_service.save_test_execution(execution_record)
 
         return {
-            "test_case_id": test_case.id,
-            "test_case_name": test_case.test_case_name,
+            "test_case_id": test_case_id,
+            "test_case_name": test_case_name,
             "execution_id": execution_id,
             "test_passed": test_passed,
-            "expected_decision": test_case.expected_decision,
+            "expected_decision": expected_decision,
             "actual_decision": actual_decision,
-            "expected_risk": test_case.expected_risk_category,
+            "actual_reasons": actual_reasons,  # Include actual reasons for hierarchical rule evaluation
+            "expected_risk": expected_risk_category,
             "actual_risk": actual_risk,
             "pass_reason": pass_reason,
             "fail_reason": fail_reason,
@@ -282,10 +339,13 @@ class TestExecutor:
             # Get container endpoint from database
             container = self.db_service.get_container(container_id)
             if not container:
-                raise ValueError(f"Container not found: {container_id}")
+                raise ValueError(f"Container not found in database: {container_id}")
 
-            # Build URL
-            endpoint = container.endpoint or "http://drools:8080"
+            # Get endpoint - no fallback allowed
+            if not container.endpoint:
+                raise ValueError(f"Container {container_id} has no endpoint configured in database")
+
+            endpoint = container.endpoint
             url = f"{endpoint}/kie-server/services/rest/server/containers/instances/{container_id}"
 
             # Execute
@@ -430,52 +490,3 @@ class TestExecutor:
         else:
             return True, "All assertions passed", None
 
-    def _map_applicant_data(self, applicant_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        [DEPRECATED - LEGACY FALLBACK ONLY]
-        Static mapping for test case applicant data fields to Drools schema.
-
-        This is a LEGACY fallback used only when IntelligentFieldMapper is not available.
-        The system should use dynamic field mapping via IntelligentFieldMapper instead.
-
-        Test cases use readable field names like 'healthStatus', 'criminalRecord'
-        Drools expects specific field names like 'health', 'felonyConviction', 'duiconviction'
-        """
-        logger.warning("Using legacy static field mapping for applicant data. "
-                      "Consider using IntelligentFieldMapper for dynamic mapping.")
-
-        mapped = applicant_data.copy()
-
-        # HARDCODED: Map healthStatus -> health
-        if 'healthStatus' in mapped:
-            mapped['health'] = mapped.pop('healthStatus')
-
-        # HARDCODED: Map criminalRecord -> felonyConviction and duiconviction
-        if 'criminalRecord' in mapped:
-            criminal_record = mapped.pop('criminalRecord')
-            mapped['felonyConviction'] = criminal_record.lower() == 'felony'
-            mapped['duiconviction'] = criminal_record.lower() == 'dui'
-
-        return mapped
-
-    def _map_policy_data(self, policy_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        [DEPRECATED - LEGACY FALLBACK ONLY]
-        Static mapping for test case policy data fields to Drools schema.
-
-        This is a LEGACY fallback used only when IntelligentFieldMapper is not available.
-        The system should use dynamic field mapping via IntelligentFieldMapper instead.
-
-        Test cases use readable field names like 'termYears'
-        Drools expects 'term'
-        """
-        logger.warning("Using legacy static field mapping for policy data. "
-                      "Consider using IntelligentFieldMapper for dynamic mapping.")
-
-        mapped = policy_data.copy()
-
-        # HARDCODED: Map termYears -> term
-        if 'termYears' in mapped:
-            mapped['term'] = mapped.pop('termYears')
-
-        return mapped

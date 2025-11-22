@@ -319,7 +319,7 @@ end
 rule "Calculate Risk Points - Smoking"
     salience 6000
     when
-        $applicant : Applicant( $smoking : smoking )
+        $applicant : Applicant( $smoking : smoker )
         not RiskPoints( factor == "smoking" )
     then
         int points = $smoking ? 5 : 0;
@@ -419,14 +419,35 @@ GUIDELINES FOR MULTI-LEVEL RULES:
 11. **When comparing fields from different objects**, use variable binding:
     - CORRECT: `$applicant : Applicant( $income : annualIncome )  $policy : Policy( coverageAmount > ($income * 10) )`
     - WRONG: `$applicant : Applicant( annualIncome * 10 < coverageAmount )`
-12. **For point-based systems**, use setter-based initialization for RiskPoints:
+12. **CRITICAL: Field Ownership - Access fields from the correct object type**:
+    - Applicant fields: age, creditScore, annualIncome, health, smoker, debtToIncome, employmentStatus, occupation, etc.
+    - Policy fields: policyType, loanType, coverageAmount, term, interestRate, minimumLoanAmount, maximumLoanAmount, debtServiceCoverageRatio, etc.
+    - NEVER access Policy fields from Applicant: `Applicant(loanType == "personal")` is WRONG
+    - ALWAYS access Policy fields from Policy: `$policy : Policy(loanType == "personal")` is CORRECT
+    - Example for loan rules: `$applicant : Applicant(...) $policy : Policy(loanType == "personal", ...)`
+13. **CRITICAL: Variable Binding - Never bind variables directly to field names**:
+    - WRONG: `$smoking : smoking` or `$age : age` or `$health : health` - These are INVALID!
+    - CORRECT: `$applicant : Applicant($smoking : smoker)` - Bind to the object first, then extract the field
+    - To extract a field value: `$applicant : Applicant($smoking : smoker, $age : age, $health : health)`
+    - Then use the extracted variables in the then clause: `int points = $smoking ? 5 : 0;`
+    - Field names like 'smoking', 'age', 'health' are NOT types - they are properties of Applicant
+    - Always follow pattern: `$object : ObjectType($variable : fieldName)`
+14. **For point-based systems**, use setter-based initialization for RiskPoints:
     - CORRECT: `RiskPoints rp = new RiskPoints(); rp.setFactor("credit"); rp.setPoints(points); insert(rp);`
-13. **Use 'not' checks** to ensure rules fire only once: `when not CreditTier() then ...`
-14. **Add comments** to mark each stage clearly
-15. **Handle special rejection rules** early (high salience) to short-circuit evaluation
-16. **Create clear, specific rule names** based on the extracted data (e.g., "Income Check - Tier A Excellent Health")
-17. **Make rules executable and testable** - ensure all syntax is valid Drools DRL
-18. **Add section comments** to organize rules by stage/purpose
+15. **CRITICAL: Type Conversion for accumulate() results**:
+    - The `accumulate()` function returns a `Long` or `BigDecimal`, NOT an `int`
+    - ALWAYS convert accumulate results before using with int setters:
+    - CORRECT: `int total = $total.intValue(); rc.setTotalPoints(total);`
+    - WRONG: `rc.setTotalPoints($total);` (will fail: Long cannot be used where int is required)
+    - For sum operations: `int total = $total.intValue();` then use `total` variable
+    - For count operations: `int count = $count.intValue();` then use `count` variable
+    - For average operations: `double avg = $avg.doubleValue();` then use `avg` variable
+16. **Use 'not' checks** to ensure rules fire only once: `when not CreditTier() then ...`
+16. **Add comments** to mark each stage clearly
+17. **Handle special rejection rules** early (high salience) to short-circuit evaluation
+18. **Create clear, specific rule names** based on the extracted data (e.g., "Income Check - Tier A Excellent Health")
+19. **Make rules executable and testable** - ensure all syntax is valid Drools DRL
+20. **Add section comments** to organize rules by stage/purpose
 
 SPECIAL HANDLING FOR EXTRACTED DATA:
 
@@ -484,12 +505,23 @@ end
 
         drl = "// Dynamically generated schema from policy document\n\n"
 
+        # Helper function to map field types to Drools-compatible types
+        def map_field_type(field_type: str) -> str:
+            """Map schema field types to fully-qualified Drools types"""
+            type_mapping = {
+                'Date': 'java.util.Date',
+                'List': 'java.util.List',
+                'Map': 'java.util.Map',
+                'Set': 'java.util.Set'
+            }
+            return type_mapping.get(field_type, field_type)
+
         # Generate Applicant declaration
         if self.schema.get('applicant_fields'):
             drl += "declare Applicant\n"
             for field in self.schema['applicant_fields']:
                 field_name = field['field_name']
-                field_type = field['field_type']
+                field_type = map_field_type(field['field_type'])
                 description = field.get('description', '')
                 drl += f"    {field_name}: {field_type}  // {description}\n"
             drl += "end\n\n"
@@ -499,7 +531,7 @@ end
             drl += "declare Policy\n"
             for field in self.schema['policy_fields']:
                 field_name = field['field_name']
-                field_type = field['field_type']
+                field_type = map_field_type(field['field_type'])
                 description = field.get('description', '')
                 drl += f"    {field_name}: {field_type}  // {description}\n"
             drl += "end\n\n"
@@ -543,11 +575,12 @@ end
 
         return drl
 
-    def generate_rules(self, extracted_data: Dict) -> Dict[str, str]:
+    def generate_rules(self, extracted_data: Dict, policy_text: str = None) -> Dict[str, str]:
         """
-        Generate Drools rules from extracted data
+        Generate Drools rules from extracted data and/or full policy text
 
-        :param extracted_data: Data extracted by Textract
+        :param extracted_data: Data extracted by Textract (may be incomplete)
+        :param policy_text: Full policy document text (fallback for incomplete extractions)
         :return: Dictionary with 'drl', 'decision_table', and 'explanation' keys
         """
         try:
@@ -559,16 +592,47 @@ end
             if self.schema:
                 schema_context = "\n\nDYNAMIC SCHEMA INFORMATION:\n"
                 schema_context += "The following fields have been extracted from the policy document:\n\n"
-                schema_context += "Applicant fields:\n"
+                schema_context += "=== APPLICANT FIELDS (access from Applicant object) ===\n"
                 for field in self.schema.get('applicant_fields', []):
                     schema_context += f"  - {field['field_name']} ({field['field_type']}): {field.get('description', '')}\n"
-                schema_context += "\nPolicy fields:\n"
+                schema_context += "\n=== POLICY FIELDS (access from Policy object) ===\n"
                 for field in self.schema.get('policy_fields', []):
                     schema_context += f"  - {field['field_name']} ({field['field_type']}): {field.get('description', '')}\n"
+                schema_context += "\nCRITICAL FIELD OWNERSHIP RULES:\n"
+                schema_context += "1. Applicant fields (age, creditScore, annualIncome, etc.) MUST be accessed from Applicant:\n"
+                schema_context += "   CORRECT: $applicant : Applicant(age >= 18, creditScore >= 600)\n"
+                schema_context += "2. Policy fields (loanType, coverageAmount, term, interestRate, etc.) MUST be accessed from Policy:\n"
+                schema_context += "   CORRECT: $policy : Policy(loanType == \"personal\", coverageAmount > 100000)\n"
+                schema_context += "3. NEVER access Policy fields from Applicant:\n"
+                schema_context += "   WRONG: $applicant : Applicant(loanType == \"personal\")  // loanType is NOT on Applicant!\n"
+                schema_context += "4. When a rule needs both Applicant and Policy fields, bind both objects:\n"
+                schema_context += "   CORRECT: $applicant : Applicant(...) $policy : Policy(loanType == \"personal\", ...)\n"
                 schema_context += "\nUSE THESE EXACT FIELD NAMES in your rules. The declare statements will be added automatically.\n"
 
+            # Prepare input for LLM - combine extracted data with policy text
+            llm_input = json.dumps(extracted_data, indent=2) + schema_context
+
+            # If policy text is provided and extracted data has low coverage, add policy text context
+            if policy_text:
+                queries_dict = extracted_data.get('queries', {})
+                if isinstance(queries_dict, dict):
+                    queries_with_answers = sum(1 for q_data in queries_dict.values() if q_data.get('answer'))
+                    total_queries = len(queries_dict)
+                    coverage = (queries_with_answers / total_queries * 100) if total_queries > 0 else 0
+
+                    if coverage < 50:  # Less than 50% coverage
+                        print(f"⚠ Low query coverage ({coverage:.1f}%). Including policy text for direct extraction.")
+                        llm_input += f"\n\nFULL POLICY TEXT (for extracting missing rules):\n\n{policy_text[:20000]}\n\nIMPORTANT: Extract risk calculation rules, premium multipliers, and scoring systems directly from the policy text above if they are missing from the extracted data."
+
+            print("\n" + "="*80)
+            print("DEBUG: RULE GENERATION - LLM INPUT")
+            print("="*80)
+            print(llm_input[:2000])  # First 2000 chars
+            print("...")
+            print("="*80)
+
             result = self.chain.invoke({
-                "extracted_data": json.dumps(extracted_data, indent=2) + schema_context
+                "extracted_data": llm_input
             })
 
             # Parse LLM response to extract DRL and CSV
@@ -610,6 +674,7 @@ end
                 print(f"DEBUG: Final DRL length: {len(final_drl)} chars")
                 print(f"DEBUG: Final DRL contains 'CreditTier': {('CreditTier' in final_drl)}")
                 print(f"DEBUG: Final DRL contains 'AgeBracket': {('AgeBracket' in final_drl)}")
+                print(f"DEBUG: Final DRL contains risk calculation: {('Calculate Risk Points' in final_drl or 'RiskCategory' in final_drl)}")
 
                 drl = final_drl
             else:

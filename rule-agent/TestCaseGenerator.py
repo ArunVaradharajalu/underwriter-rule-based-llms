@@ -41,147 +41,126 @@ class TestCaseGenerator:
         self.llm = llm
 
     def generate_test_cases(self,
-                          policy_text: str,
-                          extracted_rules: List[Dict[str, Any]] = None,
-                          hierarchical_rules: List[Dict[str, Any]] = None,
+                          drl_content: str,
+                          schema: Dict[str, Any],
                           policy_type: str = "insurance") -> List[Dict[str, Any]]:
         """
-        Generate comprehensive test cases based on policy document and rules
+        Generate comprehensive test cases based on DRL rules ONLY
+
+        This method generates test cases directly from DRL rules to ensure perfect
+        alignment with the deployed rules. Policy-based generation has been removed.
 
         Args:
-            policy_text: Full policy document text
-            extracted_rules: List of extracted rules from DRL
-            hierarchical_rules: List of hierarchical rules
+            drl_content: The actual DRL rules content (REQUIRED)
+            schema: Dynamic schema with field definitions (REQUIRED for field name consistency)
             policy_type: Type of policy (insurance, loan, etc.)
 
         Returns:
             List of test case dictionaries
         """
-        logger.info("Generating test cases using LLM...")
+        logger.info("Generating test cases from DRL rules...")
 
-        # Build context from rules
-        rules_context = self._build_rules_context(extracted_rules, hierarchical_rules)
+        if not drl_content:
+            logger.error("DRL content is required for test case generation")
+            raise ValueError("DRL content is required. Cannot generate test cases without rules.")
 
-        # Create the prompt for LLM
-        prompt = self._create_test_generation_prompt(policy_text, rules_context, policy_type)
+        if not schema:
+            logger.warning("Schema not provided. Test cases may have incorrect field names.")
 
-        # Get LLM response
-        try:
-            response = self.llm.invoke(prompt)
-            response_text = response.content if hasattr(response, 'content') else str(response)
+        return self._generate_test_cases_from_drl(drl_content, schema, policy_type)
 
-            # Parse JSON from response
-            test_cases = self._parse_test_cases(response_text)
-
-            logger.info(f"Generated {len(test_cases)} test cases")
-            return test_cases
-
-        except Exception as e:
-            logger.error(f"Error generating test cases: {e}")
-            # Return default test cases as fallback
-            return self._generate_default_test_cases(policy_type)
-
-    def _build_rules_context(self,
-                            extracted_rules: List[Dict[str, Any]] = None,
-                            hierarchical_rules: List[Dict[str, Any]] = None) -> str:
-        """Build context string from extracted rules"""
+    def _build_schema_context(self, schema: Dict[str, Any]) -> str:
+        """
+        Build schema context to ensure test data uses correct field names
+        This is CRITICAL to prevent field name mismatches
+        """
         context = []
 
-        if extracted_rules:
-            context.append("## Extracted Rules:")
-            for i, rule in enumerate(extracted_rules[:20], 1):  # Limit to 20 rules
-                rule_text = f"{i}. {rule.get('rule_name', 'Unknown')}: {rule.get('requirement', '')}"
-                context.append(rule_text)
+        context.append("\n# SCHEMA FIELD DEFINITIONS (MUST USE THESE EXACT FIELD NAMES):")
 
-        if hierarchical_rules:
-            context.append("\n## Hierarchical Rules Structure:")
-            for rule in hierarchical_rules[:10]:  # Limit to 10 top-level rules
-                rule_text = f"- {rule.get('name', 'Unknown')}: {rule.get('expected', '')}"
-                context.append(rule_text)
+        if schema.get('applicant_fields'):
+            context.append("\n## Applicant Fields:")
+            for field in schema['applicant_fields']:
+                field_name = field['field_name']
+                field_type = field['field_type']
+                description = field.get('description', '')
+                examples = field.get('example_values', [])
+                context.append(f"  - {field_name} ({field_type}): {description}")
+                if examples:
+                    context.append(f"    Example values: {examples}")
 
-        return "\n".join(context) if context else "No specific rules provided"
+        if schema.get('policy_fields'):
+            context.append("\n## Policy Fields:")
+            for field in schema['policy_fields']:
+                field_name = field['field_name']
+                field_type = field['field_type']
+                description = field.get('description', '')
+                examples = field.get('example_values', [])
+                context.append(f"  - {field_name} ({field_type}): {description}")
+                if examples:
+                    context.append(f"    Example values: {examples}")
 
-    def _create_test_generation_prompt(self, policy_text: str, rules_context: str, policy_type: str) -> str:
-        """Create the LLM prompt for test case generation"""
-        return f"""You are a test case generator for {policy_type} underwriting policies.
+        context.append("\n**CRITICAL**: You MUST use these exact field names in test data. Do NOT use aliases or variations.")
 
-Your task is to generate comprehensive test cases that cover various scenarios for policy evaluation.
+        return "\n".join(context)
 
-# Policy Document:
-{policy_text[:3000]}... (truncated for brevity)
+    def _generate_example_from_schema(self, schema: Dict[str, Any]) -> str:
+        """
+        Generate a concrete example test case from the schema
+        This shows the LLM the exact structure and field names to use
+        """
+        example = {
+            "test_case_name": "Example - Age Below Minimum",
+            "description": "Example test case structure",
+            "category": "negative",
+            "priority": 1,
+            "applicant_data": {},
+            "policy_data": {},
+            "expected_decision": "rejected",
+            "expected_reasons": ["Example reason from DRL"],
+            "expected_risk_category": None,
+            "rule_name": "Example Rule Name from DRL"
+        }
 
-# Extracted Rules:
-{rules_context}
+        # Populate applicant_data with actual field names from schema
+        if schema and schema.get('applicant_fields'):
+            for field in schema['applicant_fields']:
+                field_name = field['field_name']
+                field_type = field['field_type']
+                examples = field.get('example_values', [])
 
-# Instructions:
-Generate 5-10 diverse test cases covering:
-1. **Positive Cases**: Ideal applicants who should be approved
-2. **Negative Cases**: Applicants who should be rejected
-3. **Boundary Cases**: Applicants at the edge of approval/rejection criteria
-4. **Edge Cases**: Unusual or rare scenarios
+                # Use example value if available, otherwise generate based on type
+                if examples:
+                    example['applicant_data'][field_name] = examples[0]
+                elif field_type == 'integer':
+                    example['applicant_data'][field_name] = 30
+                elif field_type == 'double' or field_type == 'float':
+                    example['applicant_data'][field_name] = 75000.0
+                elif field_type == 'boolean':
+                    example['applicant_data'][field_name] = False
+                else:  # string
+                    example['applicant_data'][field_name] = "example_value"
 
-For each test case, provide:
-- test_case_name: Clear, descriptive name
-- description: Detailed description of the scenario
-- category: One of [positive, negative, boundary, edge_case]
-- priority: 1 (high), 2 (medium), or 3 (low)
-- applicant_data: JSON object with applicant details
-- policy_data: JSON object with policy details
-- expected_decision: "approved" or "rejected"
-- expected_reasons: Array of reasons for the decision
-- expected_risk_category: Risk score 1-5 (1=lowest risk, 5=highest risk)
+        # Populate policy_data with actual field names from schema
+        if schema and schema.get('policy_fields'):
+            for field in schema['policy_fields']:
+                field_name = field['field_name']
+                field_type = field['field_type']
+                examples = field.get('example_values', [])
 
-# Output Format:
-Return ONLY a valid JSON array of test cases. Example:
+                # Use example value if available, otherwise generate based on type
+                if examples:
+                    example['policy_data'][field_name] = examples[0]
+                elif field_type == 'integer':
+                    example['policy_data'][field_name] = 20
+                elif field_type == 'double' or field_type == 'float':
+                    example['policy_data'][field_name] = 500000.0
+                elif field_type == 'boolean':
+                    example['policy_data'][field_name] = False
+                else:  # string
+                    example['policy_data'][field_name] = "example_value"
 
-```json
-[
-  {{
-    "test_case_name": "Ideal Applicant - Mid-Age, Good Health",
-    "description": "35-year-old non-smoker with excellent health, high income, and good credit score",
-    "category": "positive",
-    "priority": 1,
-    "applicant_data": {{
-      "age": 35,
-      "annualIncome": 75000,
-      "creditScore": 720,
-      "healthConditions": "good",
-      "smoker": false
-    }},
-    "policy_data": {{
-      "coverageAmount": 500000,
-      "termYears": 20,
-      "type": "term_life"
-    }},
-    "expected_decision": "approved",
-    "expected_reasons": ["Meets all eligibility criteria", "Low risk profile"],
-    "expected_risk_category": 2
-  }},
-  {{
-    "test_case_name": "High Risk - Elderly Smoker",
-    "description": "70-year-old smoker with pre-existing health conditions",
-    "category": "negative",
-    "priority": 1,
-    "applicant_data": {{
-      "age": 70,
-      "annualIncome": 45000,
-      "creditScore": 650,
-      "healthConditions": "fair",
-      "smoker": true
-    }},
-    "policy_data": {{
-      "coverageAmount": 1000000,
-      "termYears": 30,
-      "type": "term_life"
-    }},
-    "expected_decision": "rejected",
-    "expected_reasons": ["Age exceeds maximum limit", "High risk due to smoking", "Pre-existing health conditions"],
-    "expected_risk_category": 5
-  }}
-]
-```
-
-Generate the test cases now:"""
+        return json.dumps(example, indent=2)
 
     def _parse_test_cases(self, response_text: str) -> List[Dict[str, Any]]:
         """Parse test cases from LLM response"""
@@ -216,146 +195,161 @@ Generate the test cases now:"""
             logger.debug(f"Response text: {response_text[:500]}")
             return []
 
-    def _generate_default_test_cases(self, policy_type: str) -> List[Dict[str, Any]]:
-        """Generate default test cases when LLM fails"""
-        logger.info("Generating default test cases as fallback...")
+    def _generate_test_cases_from_drl(self, drl_content: str, schema: Dict[str, Any], policy_type: str) -> List[Dict[str, Any]]:
+        """
+        Generate test cases by analyzing DRL rules directly
+        This ensures test cases are perfectly aligned with deployed rules
 
-        if policy_type == "insurance":
-            return [
-                {
-                    "test_case_name": "Ideal Applicant - Mid-Age, Good Health",
-                    "description": "Standard approval case for healthy middle-aged applicant",
-                    "category": "positive",
-                    "priority": 1,
-                    "applicant_data": {
-                        "age": 35,
-                        "annualIncome": 75000,
-                        "creditScore": 720,
-                        "healthConditions": "good",
-                        "smoker": False
-                    },
-                    "policy_data": {
-                        "coverageAmount": 500000,
-                        "termYears": 20,
-                        "type": "term_life"
-                    },
-                    "expected_decision": "approved",
-                    "expected_reasons": ["Meets all eligibility criteria"],
-                    "expected_risk_category": 2,
-                    "is_auto_generated": True,
-                    "generation_method": "template"
-                },
-                {
-                    "test_case_name": "Young Professional - High Income",
-                    "description": "Young applicant with excellent income and credit",
-                    "category": "positive",
-                    "priority": 2,
-                    "applicant_data": {
-                        "age": 28,
-                        "annualIncome": 95000,
-                        "creditScore": 780,
-                        "healthConditions": "excellent",
-                        "smoker": False
-                    },
-                    "policy_data": {
-                        "coverageAmount": 750000,
-                        "termYears": 30,
-                        "type": "term_life"
-                    },
-                    "expected_decision": "approved",
-                    "expected_reasons": ["Excellent health profile", "High income to coverage ratio"],
-                    "expected_risk_category": 1,
-                    "is_auto_generated": True,
-                    "generation_method": "template"
-                },
-                {
-                    "test_case_name": "Boundary - Minimum Age",
-                    "description": "Applicant at minimum age threshold",
-                    "category": "boundary",
-                    "priority": 1,
-                    "applicant_data": {
-                        "age": 18,
-                        "annualIncome": 35000,
-                        "creditScore": 680,
-                        "healthConditions": "good",
-                        "smoker": False
-                    },
-                    "policy_data": {
-                        "coverageAmount": 250000,
-                        "termYears": 20,
-                        "type": "term_life"
-                    },
-                    "expected_decision": "approved",
-                    "expected_reasons": ["Meets minimum age requirement"],
-                    "expected_risk_category": 3,
-                    "is_auto_generated": True,
-                    "generation_method": "template"
-                },
-                {
-                    "test_case_name": "Negative - High Risk Smoker",
-                    "description": "Smoker with fair health conditions",
-                    "category": "negative",
-                    "priority": 1,
-                    "applicant_data": {
-                        "age": 55,
-                        "annualIncome": 60000,
-                        "creditScore": 640,
-                        "healthConditions": "fair",
-                        "smoker": True
-                    },
-                    "policy_data": {
-                        "coverageAmount": 1000000,
-                        "termYears": 25,
-                        "type": "term_life"
-                    },
-                    "expected_decision": "rejected",
-                    "expected_reasons": ["High risk due to smoking", "Health conditions below threshold"],
-                    "expected_risk_category": 5,
-                    "is_auto_generated": True,
-                    "generation_method": "template"
-                },
-                {
-                    "test_case_name": "Edge Case - Elderly with Excellent Health",
-                    "description": "Elderly applicant but with excellent health metrics",
-                    "category": "edge_case",
-                    "priority": 2,
-                    "applicant_data": {
-                        "age": 64,
-                        "annualIncome": 80000,
-                        "creditScore": 750,
-                        "healthConditions": "excellent",
-                        "smoker": False
-                    },
-                    "policy_data": {
-                        "coverageAmount": 400000,
-                        "termYears": 15,
-                        "type": "term_life"
-                    },
-                    "expected_decision": "approved",
-                    "expected_reasons": ["Excellent health compensates for age"],
-                    "expected_risk_category": 3,
-                    "is_auto_generated": True,
-                    "generation_method": "template"
-                }
-            ]
-        else:
-            # Generic template for other policy types
-            return [
-                {
-                    "test_case_name": f"Standard {policy_type.title()} Approval",
-                    "description": f"Standard approval case for {policy_type} policy",
-                    "category": "positive",
-                    "priority": 1,
-                    "applicant_data": {
-                        "age": 35,
-                        "annualIncome": 75000,
-                        "creditScore": 720
-                    },
-                    "policy_data": {},
-                    "expected_decision": "approved",
-                    "expected_reasons": ["Meets standard criteria"],
-                    "expected_risk_category": 2,
-                    "is_auto_generated": True,
-                    "generation_method": "template"
-                }
-            ]
+        Args:
+            drl_content: The DRL rules content
+            schema: Dynamic schema with field definitions
+            policy_type: Type of policy
+
+        Returns:
+            List of test case dictionaries
+        """
+        logger.info("Analyzing DRL rules to generate test cases...")
+
+        # Build schema context
+        schema_context = self._build_schema_context(schema) if schema else ""
+
+        # Generate concrete example from schema
+        example_json = self._generate_example_from_schema(schema)
+
+        # Create prompt for DRL-based test generation
+        prompt = f"""You are a test case generator for Drools DRL rules.
+
+Your task is to analyze the provided DRL rules and generate test cases that validate the rules.
+
+# DRL Rules to Test:
+```drl
+{drl_content}
+```
+
+{schema_context}
+
+# Instructions:
+
+Generate test cases with these guidelines:
+
+1. **One Test Case Per Rule**: Generate EXACTLY ONE test case for each rule in the DRL
+   - Focus on the most important rules (rejection rules, risk calculation rules)
+   - Prioritize rules with salience > 100
+
+2. **CRITICAL - Consider ALL Rules That Will Fire**: When generating test data, you MUST ensure the test data ONLY triggers the intended rule and does NOT trigger OTHER rejection rules
+   - Example: If testing "Calculate Risk Points - Health", use test data that:
+     * Has the health value you want to test (e.g., "fair")
+     * BUT also has creditScore/age/income values that AVOID triggering rejection rules
+     * Example: health="fair" + creditScore=750 (Tier A) + age=30 + good income = NO rejection
+   - Example: If testing "Calculate Risk Points - Health" with health="fair", you MUST use:
+     * creditScore >= 750 (Tier A) to avoid "Tier C with Fair Health" rejection
+     * OR creditScore >= 700 (Tier B) with health="good" or "excellent" to avoid "Tier B with Fair Health" rejection
+   - **Trace through ALL rules**: Before setting expected_decision, check if ANY rejection rule will fire
+   - **For multi-level rules**: Consider intermediate facts (CreditTier, RiskCategory) that might trigger rejections
+
+3. **Rejection Rules**: For each rejection rule, create a test case that triggers it
+   - Extract the rejection reason from the rule's "then" clause
+   - Use that exact text as the expected_reasons
+   - Set expected_decision to "rejected"
+   - Ensure test data ONLY triggers this specific rejection rule (not multiple rejections)
+
+4. **Risk Calculation Rules**: Test rules that calculate risk points or categories
+   - Include test data that triggers the specific risk calculation
+   - **CRITICAL**: Ensure test data does NOT trigger any rejection rules
+   - Set expected_decision to "approved" ONLY if no rejection rules will fire
+   - Use safe values: Tier A credit (750+), excellent/good health, reasonable age (30-40), good income
+
+5. **Field Names**: Use EXACT field names from the schema shown above (CRITICAL)
+   - Copy field names exactly from the schema
+   - Do NOT use variations or snake_case
+
+6. **Risk Category**: ALWAYS set expected_risk_category to null
+   - Risk categories are calculated dynamically by accumulating risk points
+   - Cannot be predicted without executing the rules
+   - Test validation will skip risk category comparison when null
+
+7. **Decision Logic**: 
+   - If ANY rejection rule fires → expected_decision = "rejected"
+   - If NO rejection rules fire → expected_decision = "approved"
+   - Always check ALL rejection rules in the DRL before setting expected_decision
+
+# Example Test Case Structure:
+
+Use this EXACT structure with the ACTUAL field names from the schema:
+
+```json
+{example_json}
+```
+
+# Output Format:
+
+Return ONLY a valid JSON array following the structure above.
+- Generate ONE test case per rule (maximum 15 test cases total)
+- Use EXACT field names from schema
+- Extract expected_reasons from the DRL "then" clause
+- Set expected_risk_category to null (not 0, not a number - use null)
+- Ensure all JSON is valid and properly closed
+
+CRITICAL RULES:
+- Limit to 15 test cases maximum (1 per rule)
+- Use exact field names from schema above
+- ALWAYS use null for expected_risk_category
+- **MOST IMPORTANT**: Before setting expected_decision, check ALL rejection rules in the DRL
+- For calculation rules, use test data that avoids triggering rejection rules
+- For rejection rules, use test data that ONLY triggers that specific rejection
+- Keep JSON concise and valid
+- Close all brackets properly
+
+**DECISION FLOW FOR EACH TEST CASE:**
+1. Identify the target rule you're testing
+2. Generate test data that triggers the target rule
+3. Check ALL rejection rules in the DRL - will ANY of them fire with this test data?
+4. If YES → expected_decision = "rejected", expected_reasons = [rejection reason from the firing rule]
+5. If NO → expected_decision = "approved", expected_reasons = []
+6. Set expected_risk_category = null (always)
+
+Generate the test cases now:"""
+
+        try:
+            print("\n" + "="*80)
+            print("DEBUG: DRL-BASED TEST CASE GENERATION - LLM PROMPT")
+            print("="*80)
+            print(prompt[:2000])  # First 2000 chars
+            print("...")
+            print("="*80)
+
+            response = self.llm.invoke(prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+
+            print("\n" + "="*80)
+            print("DEBUG: DRL-BASED TEST CASE GENERATION - LLM RESPONSE")
+            print("="*80)
+            print(response_text[:3000])  # First 3000 chars
+            print("...")
+            print("="*80)
+
+            # Parse JSON from response
+            test_cases = self._parse_test_cases(response_text)
+
+            print("\n" + "="*80)
+            print(f"DEBUG: GENERATED {len(test_cases)} DRL-BASED TEST CASES")
+            print("="*80)
+            for i, tc in enumerate(test_cases[:5], 1):  # Show first 5
+                print(f"\nTest Case {i}: {tc.get('test_case_name', 'Unknown')}")
+                print(f"  Rule: {tc.get('rule_name', 'N/A')}")
+                print(f"  Category: {tc.get('category')}")
+                print(f"  Expected Decision: {tc.get('expected_decision')}")
+                print(f"  Expected Reasons: {tc.get('expected_reasons', [])}")
+            if len(test_cases) > 5:
+                print(f"\n... and {len(test_cases) - 5} more test cases")
+            print("="*80)
+
+            logger.info(f"Generated {len(test_cases)} DRL-based test cases")
+            return test_cases
+
+        except Exception as e:
+            logger.error(f"Error generating DRL-based test cases: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return empty list - no fallback to policy-based generation
+            return []

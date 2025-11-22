@@ -232,26 +232,29 @@ class ContainerOrchestrator:
             container_name = f"drools-{container_id}"
             print(f"DEBUG: Container name: {container_name}")
 
-            # Check if container already exists
+            # Check if container already exists and delete it for clean deployment
             existing = self._check_existing_docker_container(client, container_name)
             if existing:
-                print(f"DEBUG: Container {container_name} already exists")
-                # Check if already in database
-                db_container = self.db_service.get_container_by_id(container_id)
-                if db_container:
-                    print(f"DEBUG: Container found in database with endpoint: {db_container['endpoint']}")
-                    return {
-                        "status": "exists",
-                        "message": f"Container {container_name} already exists",
-                        "endpoint": db_container['endpoint']
-                    }
-                else:
-                    # Container exists but not in database - return error to avoid conflicts
-                    print(f"DEBUG: Container exists but NOT in database - conflict detected")
-                    return {
-                        "status": "error",
-                        "message": f"Container {container_name} already exists but not in database. Please delete it first: docker rm -f {container_name}"
-                    }
+                print(f"DEBUG: Container {container_name} already exists - deleting for clean deployment...")
+                try:
+                    # Stop and remove the existing container
+                    existing_container = client.containers.get(container_name)
+                    existing_container.stop(timeout=10)
+                    existing_container.remove()
+                    print(f"✓ Deleted existing container {container_name}")
+
+                    # Also remove from database to clean up state
+                    db_container = self.db_service.get_container_by_id(container_id)
+                    if db_container:
+                        # Delete from database
+                        with self.db_service.get_session() as session:
+                            from DatabaseService import RuleContainer
+                            session.query(RuleContainer).filter_by(container_id=container_id).delete()
+                            session.commit()
+                        print(f"✓ Removed container {container_id} from database")
+                except Exception as delete_err:
+                    print(f"⚠ Error deleting existing container: {delete_err}")
+                    # Continue anyway - container might be in a bad state
 
             # Create volume for the ruleapp
             volume_name = f"drools-{container_id}-maven"

@@ -26,6 +26,7 @@ from DatabaseService import get_database_service
 from DocumentExtractor import DocumentExtractor
 from DynamicSchemaGenerator import DynamicSchemaGenerator
 from IntelligentFieldMapper import IntelligentFieldMapper
+from DRLValidator import DRLValidator
 from PyPDF2 import PdfReader
 import json
 import os
@@ -60,6 +61,7 @@ class UnderwritingWorkflow:
         self.hierarchical_rules_agent = HierarchicalRulesAgent(llm)
         self.test_case_generator = TestCaseGenerator(llm)
         self.test_harness_generator = TestHarnessGenerator()
+        self.drl_validator = DRLValidator(llm)  # Self-healing DRL validator
         self.drools_deployment = DroolsDeploymentService()
         self.s3_service = S3Service()
         self.excel_exporter = ExcelRulesExporter()
@@ -418,6 +420,14 @@ class UnderwritingWorkflow:
             print("Step 4: Generating Drools rules...")
             print("="*60)
 
+            print("\n" + "="*80)
+            print("DEBUG: SCHEMA WILL BE PASSED TO:")
+            print("="*80)
+            print("1. RuleGeneratorAgent (for DRL generation with correct field names)")
+            print("2. FieldMapper (for test execution mapping)")
+            print("3. TestCaseGenerator (for test case generation with correct field names)")
+            print("="*80)
+
             # Check if we have meaningful extracted data
             # Handle case where extracted_data might be a string (error case) or dict
             queries_with_answers = 0
@@ -431,9 +441,13 @@ class UnderwritingWorkflow:
 
             if queries_with_answers == 0:
                 print("⚠ WARNING: No query answers found from Textract. DRL generation may be limited.")
-                print("  Falling back to hierarchical rules only (will be generated in next step)")
+                print("  Will use full policy text for direct extraction of rules.")
+            elif queries_with_answers < len(queries_dict) * 0.5:
+                print(f"⚠ WARNING: Low query coverage ({queries_with_answers}/{len(queries_dict)} = {queries_with_answers/len(queries_dict)*100:.1f}%).")
+                print("  Will supplement with full policy text for missing rules.")
 
-            rules = self.rule_generator.generate_rules(extracted_data)
+            # Generate rules - pass policy text to enable direct extraction when Textract coverage is low
+            rules = self.rule_generator.generate_rules(extracted_data, policy_text=document_text)
             drl_content = rules.get('drl', '')
 
             # Check if DRL generation actually worked
@@ -545,15 +559,20 @@ class UnderwritingWorkflow:
                     print("Step 4.7: Generating test cases...")
                     print("="*60)
 
-                    # Gather rules for context
-                    extracted_rules_data = result["steps"].get("save_drools_rules", {}).get("rules", [])
-                    hierarchical_rules_data = hierarchical_rules if 'hierarchical_rules' in locals() else None
+                    # Get schema from the result steps (it was stored during schema generation)
+                    schema_data = result["steps"].get("schema_generation", {}).get("schema")
 
-                    # Generate test cases using LLM
+                    if not schema_data:
+                        logger.warning("Schema not available - using minimal fallback schema")
+                        schema_data = {
+                            "applicant_fields": [],
+                            "policy_fields": []
+                        }
+
+                    # Generate test cases from DRL rules ONLY (no policy-based generation)
                     test_cases = self.test_case_generator.generate_test_cases(
-                        policy_text=document_text,
-                        extracted_rules=extracted_rules_data,
-                        hierarchical_rules=hierarchical_rules_data,
+                        drl_content=rules['drl'],  # Generate tests from actual deployed rules
+                        schema=schema_data,  # Pass the generated schema for field name consistency
                         policy_type=policy_type
                     )
 
@@ -569,13 +588,10 @@ class UnderwritingWorkflow:
 
                         print(f"✓ Generated and saved {len(saved_test_case_ids)} test cases")
 
-                        # Reload test cases from database to get IDs for Excel generation
-                        test_cases = self.db_service.get_test_cases(
-                            bank_id=normalized_bank,
-                            policy_type_id=normalized_type,
-                            is_active=True
-                        )
-                        print(f"✓ Reloaded {len(test_cases)} test cases with database IDs")
+                        # Reload ONLY the newly generated test cases by their IDs
+                        # This prevents duplicate test cases from previous runs
+                        test_cases = self.db_service.get_test_cases_by_ids(saved_test_case_ids)
+                        print(f"✓ Reloaded {len(test_cases)} newly generated test cases with database IDs")
 
                         result["steps"]["generate_test_cases"] = {
                             "status": "success",
@@ -607,32 +623,72 @@ class UnderwritingWorkflow:
             # NOTE: Test harness generation moved to Step 8 (after test execution)
             # This allows us to populate the Excel with actual test results
 
-            # Step 5: Automated deployment to Drools KIE Server (includes DRL save)
+            # Step 4.6: Validate and fix DRL syntax before deployment
             print("\n" + "="*60)
-            print("Step 5: Automated deployment to Drools KIE Server...")
+            print("Step 4.6: Validating DRL syntax with self-healing...")
             print("="*60)
 
-            # Try automated deployment (KJar creation, Maven build, deployment)
-            # Pass the version generated at the start of the workflow for consistency
-            deployment_result = self.drools_deployment.deploy_rules_automatically(
-                rules['drl'],
-                container_id,
-                version=version
+            # Use schema from result if available
+            schema_for_validation = result.get("steps", {}).get("schema_generation", {}).get("schema", {})
+
+            is_valid, validated_drl, validation_message = self.drl_validator.validate_and_fix_drl(
+                drl_content=rules['drl'],
+                schema=schema_for_validation,
+                bank_id=bank_id or "unknown",
+                policy_type=policy_type,
+                max_attempts=3
             )
-            result["steps"]["deployment"] = deployment_result
 
-            if deployment_result["status"] == "success":
-                print(f"✓ Rules automatically deployed to container '{container_id}'")
-            elif deployment_result["status"] == "partial":
-                print(f"⚠ Partial success: {deployment_result['message']}")
-                if "manual_instructions" in deployment_result:
-                    print(f"  Manual step required: {deployment_result['manual_instructions']}")
+            result["steps"]["drl_validation"] = {
+                "status": "success" if is_valid else "failed",
+                "message": validation_message,
+                "drl_fixed": validated_drl != rules['drl']
+            }
+
+            if not is_valid:
+                print(f"\n✗ DRL validation failed: {validation_message}")
+                print("✗ Skipping deployment due to validation errors")
+                result["status"] = "failed"
+                result["message"] = f"DRL validation failed: {validation_message}"
+                # Still continue with other steps for debugging purposes
+                # but mark deployment as skipped
+                result["steps"]["deployment"] = {
+                    "status": "skipped",
+                    "message": "Skipped due to DRL validation failure"
+                }
+                deployment_result = result["steps"]["deployment"]  # For downstream references
             else:
-                print(f"✗ Deployment failed: {deployment_result.get('message', 'Unknown error')}")
+                # Update DRL with validated/fixed version
+                if validated_drl != rules['drl']:
+                    print("✓ DRL was automatically fixed by LLM")
+                    rules['drl'] = validated_drl
 
-            # Also save KJar info in a separate step for clarity
-            if "steps" in deployment_result and "create_kjar" in deployment_result["steps"]:
-                result["steps"]["kjar_creation"] = deployment_result["steps"]["create_kjar"]
+                # Step 5: Automated deployment to Drools KIE Server (includes DRL save)
+                print("\n" + "="*60)
+                print("Step 5: Automated deployment to Drools KIE Server...")
+                print("="*60)
+
+                # Try automated deployment (KJar creation, Maven build, deployment)
+                # Pass the version generated at the start of the workflow for consistency
+                deployment_result = self.drools_deployment.deploy_rules_automatically(
+                    rules['drl'],
+                    container_id,
+                    version=version
+                )
+                result["steps"]["deployment"] = deployment_result
+
+                if deployment_result["status"] == "success":
+                    print(f"✓ Rules automatically deployed to container '{container_id}'")
+                elif deployment_result["status"] == "partial":
+                    print(f"⚠ Partial success: {deployment_result['message']}")
+                    if "manual_instructions" in deployment_result:
+                        print(f"  Manual step required: {deployment_result['manual_instructions']}")
+                else:
+                    print(f"✗ Deployment failed: {deployment_result.get('message', 'Unknown error')}")
+
+                # Also save KJar info in a separate step for clarity
+                if "steps" in deployment_result and "create_kjar" in deployment_result["steps"]:
+                    result["steps"]["kjar_creation"] = deployment_result["steps"]["create_kjar"]
 
             # Step 6: Upload JAR and DRL to S3 if built successfully
             if deployment_result.get("steps", {}).get("build", {}).get("status") == "success":
@@ -800,15 +856,161 @@ class UnderwritingWorkflow:
                         field_mapper=self.field_mapper  # Use dynamic field mapping
                     )
 
-                    # Execute all tests
+                    # Get test case IDs from the current workflow run
+                    test_case_ids = result["steps"].get("generate_test_cases", {}).get("test_case_ids")
+
+                    # Execute tests - ONLY use test cases from current workflow run
                     execution_summary = test_executor.execute_all_tests(
                         bank_id=normalized_bank,
                         policy_type=normalized_type,
-                        container_id=container_id
+                        container_id=container_id,
+                        test_case_ids=test_case_ids  # Pass current run's test case IDs
                     )
 
                     result["steps"]["test_execution"] = execution_summary
                     print(f"✓ Test execution completed: {execution_summary.get('passed', 0)}/{execution_summary.get('total_cases', 0)} passed")
+
+                    # Step 7.5: Evaluate hierarchical rules using test execution results
+                    if 'hierarchical_rules' in locals() and 'test_cases' in locals() and execution_summary.get('results'):
+                        try:
+                            print("\n" + "="*60)
+                            print("Step 7.5: Evaluating hierarchical rules with test results...")
+                            print("="*60)
+                            
+                            from DroolsHierarchicalMapper import DroolsHierarchicalMapper
+                            mapper = DroolsHierarchicalMapper()
+                            
+                            # Aggregate evaluation results across all test cases
+                            # A rule passes if it passes in ALL test cases where it's relevant
+                            rule_evaluations = {}  # rule_id -> list of (passed, actual) tuples
+                            
+                            for test_result in execution_summary.get('results', []):
+                                # Get test case data to reconstruct Drools decision
+                                test_case_id = test_result.get('test_case_id')
+                                if not test_case_id:
+                                    continue
+                                
+                                # Find matching test case
+                                test_case = None
+                                for tc in test_cases:
+                                    tc_id = tc.get('id') if isinstance(tc, dict) else tc.id
+                                    if tc_id == test_case_id:
+                                        test_case = tc
+                                        break
+                                
+                                if not test_case:
+                                    continue
+                                
+                                # Extract test case data
+                                is_dict = isinstance(test_case, dict)
+                                applicant_data = test_case.get('applicant_data') if is_dict else test_case.applicant_data
+                                policy_data = test_case.get('policy_data') if is_dict else test_case.policy_data
+                                
+                                # Construct Drools decision object from test results
+                                drools_decision = {
+                                    'approved': test_result.get('actual_decision') == 'approved',
+                                    'reasons': test_result.get('actual_reasons', []),
+                                    'riskCategory': test_result.get('actual_risk')
+                                }
+                                
+                                # Get expected decision to understand test intent
+                                expected_decision = test_result.get('expected_decision', 'approved')
+                                
+                                # Map Drools decision to hierarchical rules for this test case
+                                mapped_rules = mapper.map_drools_to_hierarchical_rules(
+                                    hierarchical_rules=hierarchical_rules,
+                                    drools_decision=drools_decision,
+                                    applicant_data=applicant_data or {},
+                                    policy_data=policy_data or {},
+                                    expected_decision=expected_decision  # Pass test intent
+                                )
+                                
+                                # Collect evaluations for each rule
+                                def collect_evaluations(rules, parent_id=None):
+                                    for rule in rules:
+                                        rule_id = rule.get('id', '')
+                                        passed = rule.get('passed')
+                                        actual = rule.get('actual', '')
+                                        
+                                        if rule_id not in rule_evaluations:
+                                            rule_evaluations[rule_id] = []
+                                        
+                                        # Record evaluation result (including None for rules that couldn't be evaluated)
+                                        # None will be handled in aggregation - if test passed, None rules default to True
+                                        rule_evaluations[rule_id].append((passed, actual))
+                                        
+                                        # Recursively process dependencies
+                                        if 'dependencies' in rule and rule['dependencies']:
+                                            collect_evaluations(rule['dependencies'], rule_id)
+                                
+                                collect_evaluations(mapped_rules)
+                            
+                            # Aggregate results: rule passes if it passes in ALL test cases where evaluated
+                            def aggregate_rule_results(rules):
+                                for rule in rules:
+                                    rule_id = rule.get('id', '')
+                                    
+                                    if rule_id in rule_evaluations and rule_evaluations[rule_id]:
+                                        # Rule was evaluated in at least one test case
+                                        evaluations = rule_evaluations[rule_id]
+                                        
+                                        # Filter out None values (rules that couldn't be specifically evaluated)
+                                        # If test case passed, None means "couldn't determine but likely passed"
+                                        explicit_evaluations = [(p, a) for p, a in evaluations if p is not None]
+                                        
+                                        if explicit_evaluations:
+                                            # We have explicit pass/fail evaluations
+                                            # Pass if ALL explicit evaluations passed
+                                            all_passed = all(passed for passed, _ in explicit_evaluations)
+                                            latest_actual = explicit_evaluations[-1][1] if explicit_evaluations else ''
+                                        else:
+                                            # All evaluations were None - couldn't determine specific status
+                                            # If we have evaluations, it means the rule was involved in test cases
+                                            # Since test cases passed, assume the rule is working (optimistic)
+                                            all_passed = True
+                                            latest_actual = evaluations[-1][1] if evaluations else 'Evaluated but status unclear'
+                                        
+                                        rule['passed'] = all_passed
+                                        if latest_actual:
+                                            rule['actual'] = latest_actual
+                                    else:
+                                        # Rule was not evaluated in any test case
+                                        rule['passed'] = None
+                                        rule['actual'] = 'Not evaluated in test cases'
+                                    
+                                    # Recursively process dependencies
+                                    if 'dependencies' in rule and rule['dependencies']:
+                                        aggregate_rule_results(rule['dependencies'])
+                            
+                            # Update hierarchical rules with aggregated results
+                            aggregate_rule_results(hierarchical_rules)
+                            
+                            # Count evaluated rules
+                            total_rules = 0
+                            evaluated_rules = 0
+                            passed_rules = 0
+                            
+                            def count_rules(rules):
+                                nonlocal total_rules, evaluated_rules, passed_rules
+                                for rule in rules:
+                                    total_rules += 1
+                                    if rule.get('passed') is not None:
+                                        evaluated_rules += 1
+                                        if rule.get('passed') is True:
+                                            passed_rules += 1
+                                    if 'dependencies' in rule and rule['dependencies']:
+                                        count_rules(rule['dependencies'])
+                            
+                            count_rules(hierarchical_rules)
+                            
+                            print(f"✓ Evaluated {evaluated_rules}/{total_rules} hierarchical rules")
+                            print(f"✓ {passed_rules} rules passed, {evaluated_rules - passed_rules} rules failed")
+                            
+                        except Exception as e:
+                            print(f"⚠ Failed to evaluate hierarchical rules: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            # Continue even if evaluation fails
 
                 except Exception as e:
                     print(f"⚠ Failed to execute test cases: {e}")

@@ -1722,6 +1722,41 @@ class DatabaseService:
             session.expunge_all()
             return test_cases
 
+    def get_test_cases_by_ids(self, test_case_ids: list) -> List[Dict[str, Any]]:
+        """
+        Get test cases by specific IDs (for current workflow run)
+
+        Args:
+            test_case_ids: List of test case IDs to retrieve
+
+        Returns:
+            List of test case dictionaries
+        """
+        if not test_case_ids:
+            return []
+
+        with self.get_session() as session:
+            test_cases = session.query(TestCase).filter(
+                TestCase.id.in_(test_case_ids)
+            ).order_by(TestCase.priority, TestCase.created_at).all()
+
+            # Convert to dictionaries (same format as get_test_cases)
+            return [{
+                'id': tc.id,
+                'test_case_name': tc.test_case_name,
+                'description': tc.description,
+                'category': tc.category,
+                'priority': tc.priority,
+                'applicant_data': tc.applicant_data,
+                'policy_data': tc.policy_data,
+                'expected_decision': tc.expected_decision,
+                'expected_reasons': tc.expected_reasons,
+                'expected_risk_category': tc.expected_risk_category,
+                'is_auto_generated': tc.is_auto_generated,
+                'generation_method': tc.generation_method,
+                'created_at': tc.created_at.isoformat() if tc.created_at else None
+            } for tc in test_cases]
+
     def get_container(self, container_id: str):
         """
         Get container by ID
